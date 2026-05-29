@@ -10,6 +10,9 @@ concurrency:
   group: clima-bridge
   cancel-in-progress: false
 
+permissions:
+  contents: write   # per salvare autostate.json (memoria blocco manuale)
+
 jobs:
   run:
     runs-on: ubuntu-latest
@@ -24,11 +27,12 @@ jobs:
         env:
           TZ: Europe/Rome                                   # ora locale italiana (le fasce orarie sono in ora IT)
           DRY_RUN: ${{ vars.DRY_RUN || 'true' }}          # default sicuro; metti la variabile DRY_RUN=false per agire
-          PRESENCE_URL: ${{ vars.PRESENCE_URL }}            # flag casa/fuori (raw del file presence.txt)
+          PRESENCE_URL: ${{ vars.PRESENCE_URL }}            # flag presenza (raw di presence.json)
           TARGET: ${{ vars.TARGET || '25' }}                # target normale (solo adulto a casa)
           TARGET_SOFT: ${{ vars.TARGET_SOFT || '25' }}      # target soft quando ci sono i bimbi (Jessica a casa)
           MAX_DELTA: ${{ vars.MAX_DELTA || '6' }}           # Δ max interno-esterno (anti shock termico)
           NIGHT_BUMP: ${{ vars.NIGHT_BUMP || '1.5' }}       # setback notturno soggiorno (23-7)
+          HOLD_HOURS: ${{ vars.HOLD_HOURS || '1' }}         # blocco manuale: pausa automatismo dopo un cambio a mano
           FGLAIR_EMAIL: ${{ secrets.FGLAIR_EMAIL }}
           FGLAIR_PASSWORD: ${{ secrets.FGLAIR_PASSWORD }}
           AQARA_EMAIL: ${{ secrets.AQARA_EMAIL }}
@@ -36,3 +40,16 @@ jobs:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python bridge_cloud.py
+      - name: Salva stato (autostate.json) se cambiato
+        run: |
+          git config user.name clima
+          git config user.email clima@local
+          git add autostate.json
+          if git diff --staged --quiet; then
+            echo "nessun cambio di stato"
+          else
+            git commit -m "autostate"
+            for i in 1 2 3; do
+              git pull --rebase --autostash && git push && break || sleep 4
+            done
+          fi
