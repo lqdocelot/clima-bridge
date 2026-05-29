@@ -1,9 +1,11 @@
 name: presence
 
-# Riceve un "push" dal telefono (repository_dispatch) e aggiorna presence.txt
+# Riceve i "push" dai telefoni (repository_dispatch) e aggiorna presence.json.
+# Eventi: user_casa/user_fuori (telefono utente), jess_casa/jess_fuori (telefono Jessica),
+#         casa/fuori (override manuale dal bot = entrambi).
 on:
   repository_dispatch:
-    types: [casa, fuori]
+    types: [casa, fuori, user_casa, user_fuori, jess_casa, jess_fuori]
 
 permissions:
   contents: write
@@ -13,14 +15,30 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Aggiorna flag presenza
+      - name: Aggiorna presence.json
+        env:
+          EV: ${{ github.event.action }}
         run: |
-          if [ "${{ github.event.action }}" = "casa" ]; then echo "home" > presence.txt; else echo "away" > presence.txt; fi
-          cat presence.txt
+          python3 - <<'PY'
+          import json, os
+          ev = os.environ["EV"]
+          try:
+              d = json.load(open("presence.json"))
+          except Exception:
+              d = {"user": "away", "jess": "away"}
+          if ev == "casa":        d = {"user": "home", "jess": "home"}
+          elif ev == "fuori":     d = {"user": "away", "jess": "away"}
+          elif ev == "user_casa":  d["user"] = "home"
+          elif ev == "user_fuori": d["user"] = "away"
+          elif ev == "jess_casa":  d["jess"] = "home"
+          elif ev == "jess_fuori": d["jess"] = "away"
+          json.dump(d, open("presence.json", "w"))
+          print(d)
+          PY
       - name: Commit
         run: |
           git config user.name clima
           git config user.email clima@local
-          git add presence.txt
+          git add presence.json
           git commit -m "presence: ${{ github.event.action }}" || echo "nessun cambiamento"
           git push

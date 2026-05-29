@@ -25,8 +25,10 @@ jobs:
           TZ: Europe/Rome                                   # ora locale italiana (le fasce orarie sono in ora IT)
           DRY_RUN: ${{ vars.DRY_RUN || 'true' }}          # default sicuro; metti la variabile DRY_RUN=false per agire
           PRESENCE_URL: ${{ vars.PRESENCE_URL }}            # flag casa/fuori (raw del file presence.txt)
-          TARGET: ${{ vars.TARGET || '25' }}                # temperatura obiettivo (°C reali)
+          TARGET: ${{ vars.TARGET || '25' }}                # target normale (solo adulto a casa)
+          TARGET_SOFT: ${{ vars.TARGET_SOFT || '25' }}      # target soft quando ci sono i bimbi (Jessica a casa)
           MAX_DELTA: ${{ vars.MAX_DELTA || '6' }}           # Δ max interno-esterno (anti shock termico)
+          NIGHT_BUMP: ${{ vars.NIGHT_BUMP || '1.5' }}       # setback notturno soggiorno (23-7)
           FGLAIR_EMAIL: ${{ secrets.FGLAIR_EMAIL }}
           FGLAIR_PASSWORD: ${{ secrets.FGLAIR_PASSWORD }}
           AQARA_EMAIL: ${{ secrets.AQARA_EMAIL }}

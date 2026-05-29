@@ -26,11 +26,13 @@ def now_it():
 DRY_RUN = os.environ.get("DRY_RUN", "true").lower() != "false"
 
 # ---- Comfort (tarabili anche da env) ----
-BASE_TARGET = float(os.environ.get("TARGET", "25.0"))
+BASE_TARGET = float(os.environ.get("TARGET", "25.0"))      # target normale (solo adulto a casa)
+TARGET_SOFT = float(os.environ.get("TARGET_SOFT", "25.0"))  # target gentile quando ci sono i bimbi (Jessica a casa)
 DEADZONE = 0.3
 STEP = 0.5
 SETPOINT_MIN, SETPOINT_MAX = 20.0, 29.0
 MAX_DELTA = float(os.environ.get("MAX_DELTA", "6.0"))
+NIGHT_BUMP = float(os.environ.get("NIGHT_BUMP", "1.5"))  # di notte (23-7) alza il target nelle stanze senza fascia quiet (es. soggiorno)
 RH_MAX = 60
 LAT, LON = 45.0703, 7.6869  # Torino (regolabile)
 
@@ -71,18 +73,27 @@ def round_half(x):
 
 
 def read_presence():
-    """'home' | 'away'. Default 'home' se non configurato; 'away' (sicuro) se errore."""
+    """Ritorna (anyone_home: bool, kids_mode: bool).
+    presence.json = {"user":"home/away","jess":"home/away"}.
+    anyone = qualcuno in casa; kids = Jessica a casa (≈ bimbi presenti) → modalità soft.
+    Default casa+normale se non configurato; 'fuori' (sicuro) se errore."""
     if not PRESENCE_URL:
-        return "home"
+        return True, False
     try:
-        txt = requests.get(PRESENCE_URL, timeout=10).text.strip().lower()
-        if "away" in txt or "fuori" in txt:
-            return "away"
-        if "home" in txt or "casa" in txt:
-            return "home"
+        txt = requests.get(PRESENCE_URL, timeout=10).text.strip()
+        d = json.loads(txt)
+        user = str(d.get("user", "away")).lower() == "home"
+        jess = str(d.get("jess", "away")).lower() == "home"
+        return (user or jess), jess
     except Exception:
-        pass
-    return "away"
+        # fallback formato vecchio "home"/"away"
+        try:
+            t = txt.lower()
+            if "home" in t or "casa" in t:
+                return True, True  # ambiguo → prudente: casa + soft (coi bimbi)
+        except Exception:
+            pass
+        return False, False  # tutti fuori (sicuro)
 
 
 def outdoor_temp():
@@ -139,10 +150,12 @@ def main():
     actions = []
     print(f"== Ponte CLOUD @ {now_it():%H:%M} IT (DRY_RUN={DRY_RUN}) ==")
     try:
-        presence = read_presence()
+        anyone, kids = read_presence()
+        base = TARGET_SOFT if kids else BASE_TARGET
         out = outdoor_temp()
-        target = BASE_TARGET if out is None else max(BASE_TARGET, out - MAX_DELTA)
-        print(f"Presenza: {presence} | esterno: {out}°C | target: {target:.1f}°C")
+        target = base if out is None else max(base, out - MAX_DELTA)
+        stato = "tutti fuori" if not anyone else ("Jessica/bimbi a casa (soft)" if kids else "solo adulto a casa")
+        print(f"Presenza: {stato} | esterno: {out}°C | target: {target:.1f}°C")
 
         readings = aqara_readings()
         print("Aqara:", {k[-6:]: f"{v['temp']:.1f}°C/{v['hum']:.0f}%" if v['hum'] else f"{v['temp']:.1f}°C" for k, v in readings.items()})
@@ -174,26 +187,30 @@ def main():
                         print(f"   fascia notturna {qs}-{qe}, già spento")
                     continue
 
-            # CASA VUOTA -> spegni (efficienza)
-            if presence == "away":
+            # TUTTI FUORI -> spegni (efficienza)
+            if not anyone:
                 if cur_mode != 0:
-                    print("   casa vuota -> spengo")
+                    print("   tutti fuori -> spengo")
                     if not DRY_RUN:
                         fg_set(H, p["operation_mode"]["key"], 0)
-                    actions.append(f"{room['name']}: casa vuota → spento")
+                    actions.append(f"{room['name']}: tutti fuori → spento")
                 else:
-                    print("   casa vuota, già spento")
+                    print("   tutti fuori, già spento")
                 continue
 
-            # CASA ABITATA -> controllo dolce verso target
-            error = temp - target
+            # CASA ABITATA -> controllo dolce verso il target (con setback notturno per stanze senza quiet)
+            room_target = target
+            if not room.get("quiet") and (23 <= now_it().hour or now_it().hour < 7):
+                room_target = target + NIGHT_BUMP
+                print(f"   (notte: target soggiorno {room_target:.1f}°C)")
+            error = temp - room_target
             if cur_mode != COOL:
-                new_sp = round_half(target)
+                new_sp = round_half(room_target)
                 reason = f"avvio cool {new_sp:.1f}°C"
             elif error > DEADZONE:
-                new_sp = round_half(cur_sp - STEP); reason = f"{temp:.1f}>{target:.1f} → setpoint {new_sp:.1f}°C"
+                new_sp = round_half(cur_sp - STEP); reason = f"{temp:.1f}>{room_target:.1f} → setpoint {new_sp:.1f}°C"
             elif error < -DEADZONE:
-                new_sp = round_half(cur_sp + STEP); reason = f"{temp:.1f}<{target:.1f} → setpoint {new_sp:.1f}°C"
+                new_sp = round_half(cur_sp + STEP); reason = f"{temp:.1f}<{room_target:.1f} → setpoint {new_sp:.1f}°C"
             else:
                 print(f"   stabile a {temp:.1f}°C (nessun cambio)"); continue
             new_sp = min(SETPOINT_MAX, max(SETPOINT_MIN, new_sp))
