@@ -40,8 +40,8 @@ FAN_QUIET = 0
 RES_TEMP, RES_HUM = "0.1.85", "0.2.85"
 ROOMS = [
     {"name": "SOGGIORNO", "dsn": "AC000W002919142", "sensor": "lumi.158d008afda8d2"},
-    # CAMERA = cameretta di Eva: di notte (dopo le 22) NON si interviene (lei dorme).
-    {"name": "CAMERA",    "dsn": "AC000W002919128", "sensor": "lumi.158d0008974abd", "quiet": (22, 7)},
+    # CAMERA = cameretta di Eva: 22:00-08:00 deve stare SPENTO (lei dorme).
+    {"name": "CAMERA",    "dsn": "AC000W002919128", "sensor": "lumi.158d0008974abd", "quiet": (22, 8)},
 ]
 
 TG_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
@@ -146,21 +146,26 @@ def main():
             if not r:
                 print(f"[{room['name']}] sensore non letto, salto."); continue
             temp = r["temp"]
+            p = fg_props(H, room["dsn"])
+            cur_mode = p["operation_mode"]["value"]
+            cur_sp = p["adjust_temperature"]["value"] / 10
+            print(f"\n[{room['name']}] reale={temp:.1f}°C | clima: {MODE.get(cur_mode)} @ {cur_sp:.1f}°C")
 
-            # Fascia notturna per-stanza (es. cameretta Eva dopo le 22): non si interviene
+            # Fascia notturna per-stanza (cameretta Eva 22-8): DEVE stare spento
             q = room.get("quiet")
             if q:
                 h = datetime.now().hour
                 qs, qe = q
                 in_quiet = (qs <= h or h < qe) if qs > qe else (qs <= h < qe)
                 if in_quiet:
-                    print(f"[{room['name']}] {h}:00 — fascia notturna {qs}-{qe}: non intervengo (quel che è fatto è fatto)")
+                    if cur_mode != 0:
+                        print(f"   fascia notturna {qs}-{qe} → spengo")
+                        if not DRY_RUN:
+                            fg_set(H, p["operation_mode"]["key"], 0)
+                        actions.append(f"{room['name']}: notte (dopo le {qs}) → spento")
+                    else:
+                        print(f"   fascia notturna {qs}-{qe}, già spento")
                     continue
-
-            p = fg_props(H, room["dsn"])
-            cur_mode = p["operation_mode"]["value"]
-            cur_sp = p["adjust_temperature"]["value"] / 10
-            print(f"\n[{room['name']}] reale={temp:.1f}°C | clima: {MODE.get(cur_mode)} @ {cur_sp:.1f}°C")
 
             # CASA VUOTA -> spegni (efficienza)
             if presence == "away":
