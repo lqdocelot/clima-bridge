@@ -12,9 +12,16 @@ DRY_RUN=true (default) -> non comanda nulla, stampa/avvisa soltanto.
 import json
 import os
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import requests
 from aqara_iot import AqaraOpenAPI, AqaraDeviceManager
+
+TZ_ROME = ZoneInfo("Europe/Rome")  # ora locale italiana, esplicita (il runner GitHub è UTC)
+
+
+def now_it():
+    return datetime.now(TZ_ROME)
 
 DRY_RUN = os.environ.get("DRY_RUN", "true").lower() != "false"
 
@@ -130,7 +137,7 @@ def fg_set(H, key, value):
 
 def main():
     actions = []
-    print(f"== Ponte CLOUD @ {datetime.now():%H:%M} (DRY_RUN={DRY_RUN}) ==")
+    print(f"== Ponte CLOUD @ {now_it():%H:%M} IT (DRY_RUN={DRY_RUN}) ==")
     try:
         presence = read_presence()
         out = outdoor_temp()
@@ -154,7 +161,7 @@ def main():
             # Fascia notturna per-stanza (cameretta Eva 22-8): DEVE stare spento
             q = room.get("quiet")
             if q:
-                h = datetime.now().hour
+                h = now_it().hour
                 qs, qe = q
                 in_quiet = (qs <= h or h < qe) if qs > qe else (qs <= h < qe)
                 if in_quiet:

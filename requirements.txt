@@ -1,2 +1,3 @@
 requests
 aqara-iot-py-sdk
+tzdata
