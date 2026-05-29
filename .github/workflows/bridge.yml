@@ -1,0 +1,32 @@
+name: clima-bridge
+
+on:
+  schedule:
+    - cron: '*/15 * * * *'   # ogni ~15 minuti (GitHub a volte ritarda un po')
+  workflow_dispatch: {}        # permette l'avvio manuale dal sito
+
+# evita esecuzioni sovrapposte
+concurrency:
+  group: clima-bridge
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install --quiet -r requirements.txt
+      - name: Esegui il ponte clima
+        env:
+          DRY_RUN: ${{ vars.DRY_RUN || 'true' }}          # default sicuro; metti la variabile DRY_RUN=false per agire
+          FGLAIR_EMAIL: ${{ secrets.FGLAIR_EMAIL }}
+          FGLAIR_PASSWORD: ${{ secrets.FGLAIR_PASSWORD }}
+          AQARA_EMAIL: ${{ secrets.AQARA_EMAIL }}
+          AQARA_PASSWORD: ${{ secrets.AQARA_PASSWORD }}
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python bridge_cloud.py

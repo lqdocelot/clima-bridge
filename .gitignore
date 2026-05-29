@@ -1,0 +1,7 @@
+secrets.env
+*.env
+token.txt
+.venv*/
+matter-data/
+__pycache__/
+*.log

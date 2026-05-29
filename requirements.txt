@@ -1,0 +1,2 @@
+requests
+aqara-iot-py-sdk
