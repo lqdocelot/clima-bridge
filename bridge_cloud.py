@@ -49,6 +49,13 @@ COOL = 3
 FAN_QUIET = 0
 
 RES_TEMP, RES_HUM = "0.1.85", "0.2.85"
+# nomi leggibili dei sensori Aqara (per il bot Telegram)
+SENSOR_NAMES = {
+    "lumi.158d008afda8d2": "🛋️ Soggiorno",
+    "lumi.158d0008974abd": "🧸 Cameretta EVA",
+    "lumi.158d008afda91f": "🛏️ Camera",
+    "lumi.158d0008ab1164": "🚿 Bagno",
+}
 ROOMS = [
     {"name": "SOGGIORNO", "dsn": "AC000W002919142", "sensor": "lumi.158d008afda8d2"},
     # CAMERA = cameretta di Eva: 22:00-08:00 deve stare SPENTO (lei dorme).
@@ -172,6 +179,19 @@ def main():
 
         readings = aqara_readings()
         print("Aqara:", {k[-6:]: f"{v['temp']:.1f}°C/{v['hum']:.0f}%" if v['hum'] else f"{v['temp']:.1f}°C" for k, v in readings.items()})
+
+        # pubblica temperature/umidità per il bot Telegram (sensors.json nel repo)
+        try:
+            rooms_out = []
+            for did, name in SENSOR_NAMES.items():
+                v = readings.get(did)
+                if v:
+                    rooms_out.append({"name": name, "t": round(v["temp"], 1),
+                                      "h": (round(v["hum"]) if v["hum"] is not None else None)})
+            json.dump({"updated": now_it().strftime("%H:%M"), "rooms": rooms_out}, open("sensors.json", "w"))
+        except Exception as e:
+            print("sensors.json err:", e)
+
         H = fg_login()
         autostate = load_autostate()
         now_ts = now_it().timestamp()

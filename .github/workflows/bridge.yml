@@ -44,7 +44,7 @@ jobs:
         run: |
           git config user.name clima
           git config user.email clima@local
-          git add autostate.json
+          git add autostate.json sensors.json
           if git diff --staged --quiet; then
             echo "nessun cambio di stato"
           else
