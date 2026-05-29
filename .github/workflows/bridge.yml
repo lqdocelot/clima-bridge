@@ -22,6 +22,7 @@ jobs:
       - run: pip install --quiet -r requirements.txt
       - name: Esegui il ponte clima
         env:
+          TZ: Europe/Rome                                   # ora locale italiana (le fasce orarie sono in ora IT)
           DRY_RUN: ${{ vars.DRY_RUN || 'true' }}          # default sicuro; metti la variabile DRY_RUN=false per agire
           PRESENCE_URL: ${{ vars.PRESENCE_URL }}            # flag casa/fuori (raw del file presence.txt)
           TARGET: ${{ vars.TARGET || '25' }}                # temperatura obiettivo (°C reali)

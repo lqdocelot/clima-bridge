@@ -40,7 +40,8 @@ FAN_QUIET = 0
 RES_TEMP, RES_HUM = "0.1.85", "0.2.85"
 ROOMS = [
     {"name": "SOGGIORNO", "dsn": "AC000W002919142", "sensor": "lumi.158d008afda8d2"},
-    {"name": "CAMERA",    "dsn": "AC000W002919128", "sensor": "lumi.158d0008974abd"},
+    # CAMERA = cameretta di Eva: di notte (dopo le 22) NON si interviene (lei dorme).
+    {"name": "CAMERA",    "dsn": "AC000W002919128", "sensor": "lumi.158d0008974abd", "quiet": (22, 7)},
 ]
 
 TG_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
@@ -145,6 +146,17 @@ def main():
             if not r:
                 print(f"[{room['name']}] sensore non letto, salto."); continue
             temp = r["temp"]
+
+            # Fascia notturna per-stanza (es. cameretta Eva dopo le 22): non si interviene
+            q = room.get("quiet")
+            if q:
+                h = datetime.now().hour
+                qs, qe = q
+                in_quiet = (qs <= h or h < qe) if qs > qe else (qs <= h < qe)
+                if in_quiet:
+                    print(f"[{room['name']}] {h}:00 — fascia notturna {qs}-{qe}: non intervengo (quel che è fatto è fatto)")
+                    continue
+
             p = fg_props(H, room["dsn"])
             cur_mode = p["operation_mode"]["value"]
             cur_sp = p["adjust_temperature"]["value"] / 10
