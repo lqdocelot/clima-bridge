@@ -1,0 +1,26 @@
+name: presence
+
+# Riceve un "push" dal telefono (repository_dispatch) e aggiorna presence.txt
+on:
+  repository_dispatch:
+    types: [casa, fuori]
+
+permissions:
+  contents: write
+
+jobs:
+  set:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Aggiorna flag presenza
+        run: |
+          if [ "${{ github.event.action }}" = "casa" ]; then echo "home" > presence.txt; else echo "away" > presence.txt; fi
+          cat presence.txt
+      - name: Commit
+        run: |
+          git config user.name clima
+          git config user.email clima@local
+          git add presence.txt
+          git commit -m "presence: ${{ github.event.action }}" || echo "nessun cambiamento"
+          git push

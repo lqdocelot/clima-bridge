@@ -23,6 +23,7 @@ jobs:
       - name: Esegui il ponte clima
         env:
           DRY_RUN: ${{ vars.DRY_RUN || 'true' }}          # default sicuro; metti la variabile DRY_RUN=false per agire
+          PRESENCE_URL: ${{ vars.PRESENCE_URL }}            # flag casa/fuori (raw del file presence.txt)
           FGLAIR_EMAIL: ${{ secrets.FGLAIR_EMAIL }}
           FGLAIR_PASSWORD: ${{ secrets.FGLAIR_PASSWORD }}
           AQARA_EMAIL: ${{ secrets.AQARA_EMAIL }}
