@@ -14,14 +14,30 @@ import os
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+import holidays
 import requests
 from aqara_iot import AqaraOpenAPI, AqaraDeviceManager
 
 TZ_ROME = ZoneInfo("Europe/Rome")  # ora locale italiana, esplicita (il runner GitHub è UTC)
 
+# Festività nazionali IT (mobili incluse, es. Pasquetta). L'oggetto espande gli anni al volo.
+_IT_HOLIDAYS = holidays.Italy()
+
 
 def now_it():
     return datetime.now(TZ_ROME)
+
+
+def is_home_day(d):
+    """True se 'd' è un giorno in cui probabilmente si dorme/si è a casa al mattino:
+    weekend (sab/dom) o festivo nazionale italiano."""
+    return d.weekday() >= 5 or d in _IT_HOLIDAYS
+
+
+def wake_hour_for(d):
+    """Ora (decimale, es. 9.5 = 09:30) in cui il clima della cameretta può riaccendersi
+    al mattino: feriale → WAKE_NORMAL, weekend/festivi → WAKE_HOME (più tardi)."""
+    return WAKE_HOME if is_home_day(d) else WAKE_NORMAL
 
 DRY_RUN = os.environ.get("DRY_RUN", "true").lower() != "false"
 
@@ -33,6 +49,9 @@ STEP = 0.5
 SETPOINT_MIN, SETPOINT_MAX = 20.0, 29.0
 MAX_DELTA = float(os.environ.get("MAX_DELTA", "6.0"))
 NIGHT_BUMP = float(os.environ.get("NIGHT_BUMP", "1.5"))  # di notte (23-7) alza il target nelle stanze senza fascia quiet (es. soggiorno)
+# Risveglio cameretta: ora (decimale) di riaccensione al mattino dopo la fascia notturna.
+WAKE_NORMAL = float(os.environ.get("WAKE_HOUR", "9.5"))       # feriali → 09:30
+WAKE_HOME = float(os.environ.get("WAKE_HOUR_HOME", "12.0"))   # weekend/festivi → 12:00 (si dorme)
 HOLD_SECONDS = int(float(os.environ.get("HOLD_HOURS", "1")) * 3600)  # blocco manuale: dopo un cambio a mano, l'automatismo si ferma per N ore
 AUTOSTATE_FILE = "autostate.json"  # memoria di cosa ha impostato l'automatismo + scadenza blocco manuale (nel repo)
 RH_MAX = 60
@@ -58,8 +77,9 @@ SENSOR_NAMES = {
 }
 ROOMS = [
     {"name": "SOGGIORNO", "dsn": "AC000W002919142", "sensor": "lumi.158d008afda8d2"},
-    # CAMERA = cameretta di Eva: 22:00-08:00 deve stare SPENTO (lei dorme).
-    {"name": "CAMERA",    "dsn": "AC000W002919128", "sensor": "lumi.158d0008974abd", "quiet": (22, 8)},
+    # CAMERA = cameretta di Eva: spento la notte; riaccensione mattutina dinamica
+    # (feriali WAKE_NORMAL=09:30, weekend/festivi WAKE_HOME=12:00). Vedi wake_hour_for().
+    {"name": "CAMERA",    "dsn": "AC000W002919128", "sensor": "lumi.158d0008974abd", "quiet": (22, WAKE_NORMAL)},
 ]
 
 TG_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
@@ -209,17 +229,21 @@ def main():
             print(f"\n[{room['name']}] reale={temp:.1f}°C | clima: {MODE.get(cur_mode)} @ {cur_sp:.1f}°C")
             st = autostate.get(dsn, {})
 
-            # SICUREZZA 1 — Fascia notturna Eva (22-8): spento (vince su tutto, anche sul blocco manuale)
+            # SICUREZZA 1 — Fascia notturna Eva: spento (vince su tutto, anche sul blocco manuale).
+            # Sera fissa (22:00); risveglio mattutino dinamico: 09:30 feriali / 12:00 weekend-festivi.
             q = room.get("quiet")
             if q:
-                h = now_it().hour; qs, qe = q
+                now = now_it()
+                h = now.hour + now.minute / 60
+                qs, _ = q
+                qe = wake_hour_for(now.date())
                 if ((qs <= h or h < qe) if qs > qe else (qs <= h < qe)):
                     if cur_mode != 0:
-                        print(f"   fascia notturna {qs}-{qe} → spengo")
+                        print(f"   fascia notturna {qs:g}-{qe:g} → spengo")
                         if not DRY_RUN: fg_set(H, p["operation_mode"]["key"], 0)
                         actions.append(f"{room['name']}: notte → spento")
                     else:
-                        print(f"   fascia notturna {qs}-{qe}, già spento")
+                        print(f"   fascia notturna {qs:g}-{qe:g}, già spento")
                     autostate[dsn] = {"mode": 0, "sp": cur_sp_raw, "hold_until": 0}
                     continue
 

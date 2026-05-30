@@ -33,6 +33,8 @@ jobs:
           MAX_DELTA: ${{ vars.MAX_DELTA || '6' }}           # Δ max interno-esterno (anti shock termico)
           NIGHT_BUMP: ${{ vars.NIGHT_BUMP || '1.5' }}       # setback notturno soggiorno (23-7)
           HOLD_HOURS: ${{ vars.HOLD_HOURS || '1' }}         # blocco manuale: pausa automatismo dopo un cambio a mano
+          WAKE_HOUR: ${{ vars.WAKE_HOUR || '9.5' }}          # cameretta: riaccensione mattutina feriali (09:30)
+          WAKE_HOUR_HOME: ${{ vars.WAKE_HOUR_HOME || '12' }} # cameretta: riaccensione weekend/festivi (12:00)
           FGLAIR_EMAIL: ${{ secrets.FGLAIR_EMAIL }}
           FGLAIR_PASSWORD: ${{ secrets.FGLAIR_PASSWORD }}
           AQARA_EMAIL: ${{ secrets.AQARA_EMAIL }}
