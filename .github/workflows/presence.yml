@@ -1,11 +1,22 @@
 name: presence
 
-# Riceve i "push" dai telefoni (repository_dispatch) e aggiorna presence.json.
+# Riceve i "push" dai telefoni/bot e aggiorna presence.json.
 # Eventi: user_casa/user_fuori (telefono utente), jess_casa/jess_fuori (telefono Jessica),
-#         casa/fuori (override manuale dal bot = entrambi).
+#         casa/fuori (override = entrambi, dal bot).
+# Due trigger:
+#  - workflow_dispatch (input "action"): chiamabile con un token che ha solo Actions:write
+#    (NON può modificare il repo né leggere i secrets) → usato da telefoni/val.town/cron.
+#  - repository_dispatch: trigger storico, tenuto durante la migrazione (richiede Contents:write).
 on:
   repository_dispatch:
     types: [casa, fuori, user_casa, user_fuori, jess_casa, jess_fuori]
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "Evento presenza"
+        required: true
+        type: choice
+        options: [casa, fuori, user_casa, user_fuori, jess_casa, jess_fuori]
 
 permissions:
   contents: write
@@ -17,7 +28,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Aggiorna presence.json
         env:
-          EV: ${{ github.event.action }}
+          EV: ${{ github.event.inputs.action || github.event.action }}
         run: |
           python3 - <<'PY'
           import json, os
@@ -40,7 +51,7 @@ jobs:
           git config user.name clima
           git config user.email clima@local
           git add presence.json
-          git commit -m "presence: ${{ github.event.action }}" || echo "nessun cambiamento"
+          git commit -m "presence: ${{ github.event.inputs.action || github.event.action }}" || echo "nessun cambiamento"
           for i in 1 2 3; do
             git pull --rebase --autostash && git push && break || sleep 4
           done
