@@ -35,6 +35,7 @@ jobs:
           HOLD_HOURS: ${{ vars.HOLD_HOURS || '1' }}         # blocco manuale: pausa automatismo dopo un cambio a mano
           WAKE_HOUR: ${{ vars.WAKE_HOUR || '9.5' }}          # cameretta: riaccensione mattutina feriali (09:30)
           WAKE_HOUR_HOME: ${{ vars.WAKE_HOUR_HOME || '12' }} # cameretta: riaccensione weekend/festivi (12:00)
+          HARD_QUIET_END: ${{ vars.HARD_QUIET_END || '7' }}  # cameretta: notte assoluta 22-07; dopo, coda scavalcabile a mano
           FGLAIR_EMAIL: ${{ secrets.FGLAIR_EMAIL }}
           FGLAIR_PASSWORD: ${{ secrets.FGLAIR_PASSWORD }}
           AQARA_EMAIL: ${{ secrets.AQARA_EMAIL }}

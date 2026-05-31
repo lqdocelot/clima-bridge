@@ -39,6 +39,21 @@ def wake_hour_for(d):
     al mattino: feriale → WAKE_NORMAL, weekend/festivi → WAKE_HOME (più tardi)."""
     return WAKE_HOME if is_home_day(d) else WAKE_NORMAL
 
+
+def quiet_phase(h, qe, hard_end=7.0, qs=22):
+    """Classifica l'ora decimale h nella fascia di spegnimento cameretta.
+    qs = sera (22), qe = fine finestra/risveglio (9.5 feriali, 12 weekend-festivi),
+    hard_end = confine notte-profonda/coda-mattutina (default 07:00).
+      'hard' = notte profonda (qs→hard_end): spento ASSOLUTO, non scavalcabile a mano
+      'soft' = coda mattutina (hard_end→qe): spento di default ma scavalcabile a mano per HOLD
+      None   = fuori finestra: controllo normale.
+    Le finestre gestiscono il wrap a mezzanotte (qs > qe/hard_end)."""
+    def in_win(a, b):
+        return (a <= h or h < b) if a > b else (a <= h < b)
+    if not in_win(qs, qe):
+        return None
+    return "hard" if in_win(qs, hard_end) else "soft"
+
 DRY_RUN = os.environ.get("DRY_RUN", "true").lower() != "false"
 
 # ---- Comfort (tarabili anche da env) ----
@@ -52,6 +67,7 @@ NIGHT_BUMP = float(os.environ.get("NIGHT_BUMP", "1.5"))  # di notte (23-7) alza 
 # Risveglio cameretta: ora (decimale) di riaccensione al mattino dopo la fascia notturna.
 WAKE_NORMAL = float(os.environ.get("WAKE_HOUR", "9.5"))       # feriali → 09:30
 WAKE_HOME = float(os.environ.get("WAKE_HOUR_HOME", "12.0"))   # weekend/festivi → 12:00 (si dorme)
+HARD_QUIET_END = float(os.environ.get("HARD_QUIET_END", "7.0"))  # 22:00→07:00 spegnimento ASSOLUTO; dopo, coda scavalcabile a mano
 HOLD_SECONDS = int(float(os.environ.get("HOLD_HOURS", "1")) * 3600)  # blocco manuale: dopo un cambio a mano, l'automatismo si ferma per N ore
 AUTOSTATE_FILE = "autostate.json"  # memoria di cosa ha impostato l'automatismo + scadenza blocco manuale (nel repo)
 RH_MAX = 60
@@ -229,23 +245,22 @@ def main():
             print(f"\n[{room['name']}] reale={temp:.1f}°C | clima: {MODE.get(cur_mode)} @ {cur_sp:.1f}°C")
             st = autostate.get(dsn, {})
 
-            # SICUREZZA 1 — Fascia notturna Eva: spento (vince su tutto, anche sul blocco manuale).
-            # Sera fissa (22:00); risveglio mattutino dinamico: 09:30 feriali / 12:00 weekend-festivi.
+            # SICUREZZA 1 — Fascia notturna cameretta. Sera fissa 22:00; risveglio 09:30 feriali / 12:00 weekend-festivi.
+            #  - notte profonda 22:00–07:00 ("hard"): spento ASSOLUTO, vince anche sul blocco manuale.
+            #  - coda mattutina 07:00→risveglio ("soft"): spento di default MA un cambio a mano la scavalca per HOLD_HOURS
+            #    (gestita più sotto, dopo il blocco manuale, così riusa la stessa logica di pausa).
             q = room.get("quiet")
-            if q:
-                now = now_it()
-                h = now.hour + now.minute / 60
-                qs, _ = q
-                qe = wake_hour_for(now.date())
-                if ((qs <= h or h < qe) if qs > qe else (qs <= h < qe)):
-                    if cur_mode != 0:
-                        print(f"   fascia notturna {qs:g}-{qe:g} → spengo")
-                        if not DRY_RUN: fg_set(H, p["operation_mode"]["key"], 0)
-                        actions.append(f"{room['name']}: notte → spento")
-                    else:
-                        print(f"   fascia notturna {qs:g}-{qe:g}, già spento")
-                    autostate[dsn] = {"mode": 0, "sp": cur_sp_raw, "hold_until": 0}
-                    continue
+            phase = quiet_phase(now_it().hour + now_it().minute / 60,
+                                wake_hour_for(now_it().date()), HARD_QUIET_END) if q else None
+            if phase == "hard":
+                if cur_mode != 0:
+                    print("   notte profonda → spengo (assoluto)")
+                    if not DRY_RUN: fg_set(H, p["operation_mode"]["key"], 0)
+                    actions.append(f"{room['name']}: notte → spento")
+                else:
+                    print("   notte profonda, già spento")
+                autostate[dsn] = {"mode": 0, "sp": cur_sp_raw, "hold_until": 0}
+                continue
 
             # SICUREZZA 2 — Tutti fuori: spento (vince su tutto)
             if not anyone:
@@ -270,6 +285,17 @@ def main():
                 until = datetime.fromtimestamp(until_ts, TZ_ROME).strftime("%H:%M")
                 print(f"   cambio manuale rilevato → automatismo in pausa fino alle {until}")
                 actions.append(f"{room['name']}: cambio manuale → pausa fino {until}")
+                continue
+
+            # CODA MATTUTINA (soft, 07:00→risveglio): nessun override manuale attivo → tieni spento come da fascia
+            if phase == "soft":
+                if cur_mode != 0:
+                    print("   coda mattutina → spengo (scavalcabile a mano)")
+                    if not DRY_RUN: fg_set(H, p["operation_mode"]["key"], 0)
+                    actions.append(f"{room['name']}: mattino → spento")
+                else:
+                    print("   coda mattutina, già spento")
+                autostate[dsn] = {"mode": 0, "sp": cur_sp_raw, "hold_until": 0}
                 continue
 
             # CONTROLLO DOLCE verso il target (con setback notturno per stanze senza quiet)
