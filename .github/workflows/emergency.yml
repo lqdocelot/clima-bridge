@@ -1,0 +1,49 @@
+name: emergency
+
+# Imposta/azzera il lockout di emergenza (emergency.json) letto dal ponte.
+# Invocabile con un token che ha solo Actions:write (Token-B) — non tocca codice né secrets.
+#   off    = entrambi i climi spenti per EMERGENCY_HOURS
+#   safe   = entrambi a cool gentile (26°, ventola quiet, alette su); cameretta resta off di notte
+#   cancel = sblocca subito, torna all'automatismo normale
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "off / safe / cancel"
+        required: true
+        type: choice
+        options: ["off", "safe", "cancel"]
+
+permissions:
+  contents: write
+
+jobs:
+  set:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Scrivi emergency.json
+        env:
+          EV: ${{ github.event.inputs.action }}
+          HOURS: ${{ vars.EMERGENCY_HOURS || '24' }}
+        run: |
+          python3 - <<'PY'
+          import json, os, time
+          ev = os.environ["EV"]
+          hours = float(os.environ.get("HOURS", "24") or "24")
+          if ev == "cancel":
+              d = {"mode": "none", "until": 0}
+          else:
+              d = {"mode": ev, "until": time.time() + hours * 3600}
+          json.dump(d, open("emergency.json", "w"))
+          print(d)
+          PY
+      - name: Commit
+        run: |
+          git config user.name clima
+          git config user.email clima@local
+          git add emergency.json
+          git commit -m "emergency: ${{ github.event.inputs.action }}" || echo "nessun cambiamento"
+          for i in 1 2 3; do
+            git pull --rebase --autostash && git push && break || sleep 4
+          done

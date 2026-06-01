@@ -70,6 +70,8 @@ WAKE_HOME = float(os.environ.get("WAKE_HOUR_HOME", "12.0"))   # weekend/festivi 
 HARD_QUIET_END = float(os.environ.get("HARD_QUIET_END", "7.0"))  # 22:00→07:00 spegnimento ASSOLUTO; dopo, coda scavalcabile a mano
 HOLD_SECONDS = int(float(os.environ.get("HOLD_HOURS", "1")) * 3600)  # blocco manuale: dopo un cambio a mano, l'automatismo si ferma per N ore
 AUTOSTATE_FILE = "autostate.json"  # memoria di cosa ha impostato l'automatismo + scadenza blocco manuale (nel repo)
+EMERGENCY_FILE = "emergency.json"  # lockout 24h: {"mode":"off"/"safe"/"none","until":<epoch>} (scritto dal bot/emergency.yml)
+SAFE_TARGET = float(os.environ.get("SAFE_TARGET", "26"))  # setpoint cool gentile in "modalità sicura"
 RH_MAX = 60
 LAT, LON = 45.0703, 7.6869  # Torino (regolabile)
 
@@ -191,6 +193,27 @@ def fg_set(H, key, value):
                          data=json.dumps({"datapoint": {"value": str(value)}}), timeout=15).status_code
 
 
+def load_emergency():
+    """Legge emergency.json (file locale nel repo checked-out). {} se assente/illeggibile."""
+    try:
+        return json.load(open(EMERGENCY_FILE))
+    except Exception:
+        return {}
+
+
+def emergency_mode(d=None):
+    """Ritorna 'off' / 'safe' se c'è un'emergenza ANCORA attiva (now < until), altrimenti None.
+    Fail-safe: qualsiasi errore/scadenza → None (funzionamento normale)."""
+    if d is None:
+        d = load_emergency()
+    try:
+        if d.get("mode") in ("off", "safe") and now_it().timestamp() < float(d.get("until", 0)):
+            return d["mode"]
+    except Exception:
+        pass
+    return None
+
+
 def load_autostate():
     try:
         return json.load(open(AUTOSTATE_FILE))
@@ -213,6 +236,12 @@ def main():
         stato = "tutti fuori" if not anyone else ("Jessica/bimbi a casa (soft)" if kids else "solo adulto a casa")
         print(f"Presenza: {stato} | esterno: {out}°C | target: {target:.1f}°C")
 
+        em = load_emergency()
+        emerg = emergency_mode(em)
+        if emerg:
+            until = datetime.fromtimestamp(float(em.get("until", 0)), TZ_ROME).strftime("%d/%m %H:%M")
+            print(f"🆘 EMERGENZA ATTIVA: {emerg} (fino a {until}) — bypass dell'automatismo normale")
+
         readings = aqara_readings()
         print("Aqara:", {k[-6:]: f"{v['temp']:.1f}°C/{v['hum']:.0f}%" if v['hum'] else f"{v['temp']:.1f}°C" for k, v in readings.items()})
 
@@ -224,7 +253,8 @@ def main():
                 if v:
                     rooms_out.append({"name": name, "t": round(v["temp"], 1),
                                       "h": (round(v["hum"]) if v["hum"] is not None else None)})
-            json.dump({"updated": now_it().strftime("%H:%M"), "rooms": rooms_out}, open("sensors.json", "w"))
+            json.dump({"updated": now_it().strftime("%H:%M"), "rooms": rooms_out,
+                       "emergency": {"mode": emerg or "none", "until": em.get("until", 0)}}, open("sensors.json", "w"))
         except Exception as e:
             print("sensors.json err:", e)
 
@@ -244,12 +274,54 @@ def main():
             cur_sp = cur_sp_raw / 10
             print(f"\n[{room['name']}] reale={temp:.1f}°C | clima: {MODE.get(cur_mode)} @ {cur_sp:.1f}°C")
             st = autostate.get(dsn, {})
+            q = room.get("quiet")
+
+            # EMERGENZA — lockout deliberato 24h: vince su TUTTO (presenza, target, blocco manuale, notte).
+            if emerg == "off":
+                if cur_mode != 0:
+                    print("   🆘 emergenza: spengo")
+                    if not DRY_RUN: fg_set(H, p["operation_mode"]["key"], 0)
+                    actions.append(f"{room['name']}: 🆘 spento")
+                autostate[dsn] = {"mode": 0, "sp": cur_sp_raw, "hold_until": 0}
+                continue
+            if emerg == "safe":
+                # cameretta nelle sue ore notturne resta comunque spenta (Eva dorme)
+                in_quiet = bool(q) and quiet_phase(now_it().hour + now_it().minute / 60,
+                                                   wake_hour_for(now_it().date()), HARD_QUIET_END) is not None
+                if in_quiet:
+                    if cur_mode != 0:
+                        print("   🆘 sicura + notte cameretta → spengo")
+                        if not DRY_RUN: fg_set(H, p["operation_mode"]["key"], 0)
+                        actions.append(f"{room['name']}: 🆘 notte → spento")
+                    autostate[dsn] = {"mode": 0, "sp": cur_sp_raw, "hold_until": 0}
+                    continue
+                # cool gentile: 26°, ventola silenziosa, alette in alto, niente oscillazione
+                sp_raw = int(SAFE_TARGET * 10)
+                changed = []
+                if cur_mode != COOL:
+                    if not DRY_RUN: fg_set(H, p["operation_mode"]["key"], COOL)
+                    changed.append("cool")
+                if cur_sp_raw != sp_raw:
+                    if not DRY_RUN: fg_set(H, p["adjust_temperature"]["key"], sp_raw)
+                    changed.append(f"{SAFE_TARGET:g}°")
+                if p.get("fan_speed", {}).get("value") != FAN_QUIET:
+                    if not DRY_RUN: fg_set(H, p["fan_speed"]["key"], FAN_QUIET)
+                    changed.append("quiet")
+                if p.get("af_vertical_swing", {}).get("value"):
+                    if not DRY_RUN: fg_set(H, p["af_vertical_swing"]["key"], 0)
+                    changed.append("alette su")
+                if "af_vertical_direction" in p and p["af_vertical_direction"]["value"] != 1:
+                    if not DRY_RUN: fg_set(H, p["af_vertical_direction"]["key"], 1)
+                if changed:
+                    print(f"   🆘 modalità sicura → {', '.join(changed)}")
+                    actions.append(f"{room['name']}: 🆘 sicura {SAFE_TARGET:g}°")
+                autostate[dsn] = {"mode": COOL, "sp": sp_raw, "hold_until": 0}
+                continue
 
             # SICUREZZA 1 — Fascia notturna cameretta. Sera fissa 22:00; risveglio 09:30 feriali / 12:00 weekend-festivi.
             #  - notte profonda 22:00–07:00 ("hard"): spento ASSOLUTO, vince anche sul blocco manuale.
             #  - coda mattutina 07:00→risveglio ("soft"): spento di default MA un cambio a mano la scavalca per HOLD_HOURS
             #    (gestita più sotto, dopo il blocco manuale, così riusa la stessa logica di pausa).
-            q = room.get("quiet")
             phase = quiet_phase(now_it().hour + now_it().minute / 60,
                                 wake_hour_for(now_it().date()), HARD_QUIET_END) if q else None
             if phase == "hard":
