@@ -40,19 +40,12 @@ def wake_hour_for(d):
     return WAKE_HOME if is_home_day(d) else WAKE_NORMAL
 
 
-def quiet_phase(h, qe, hard_end=7.0, qs=22):
-    """Classifica l'ora decimale h nella fascia di spegnimento cameretta.
-    qs = sera (22), qe = fine finestra/risveglio (9.5 feriali, 12 weekend-festivi),
-    hard_end = confine notte-profonda/coda-mattutina (default 07:00).
-      'hard' = notte profonda (qs→hard_end): spento ASSOLUTO, non scavalcabile a mano
-      'soft' = coda mattutina (hard_end→qe): spento di default ma scavalcabile a mano per HOLD
-      None   = fuori finestra: controllo normale.
-    Le finestre gestiscono il wrap a mezzanotte (qs > qe/hard_end)."""
-    def in_win(a, b):
-        return (a <= h or h < b) if a > b else (a <= h < b)
-    if not in_win(qs, qe):
-        return None
-    return "hard" if in_win(qs, hard_end) else "soft"
+def in_quiet_window(h, qe, qs=22):
+    """True se l'ora decimale h è nella fascia di spegnimento cameretta [qs..qe).
+    qs = sera (22), qe = risveglio (9.5 feriali, 12 weekend-festivi). Gestisce il wrap a mezzanotte.
+    Nella fascia la cameretta è spenta di DEFAULT, ma una mossa manuale la scavalca per HOLD_HOURS
+    (gestito dal blocco manuale). Non c'è più una sotto-fascia 'assoluta'."""
+    return (qs <= h or h < qe) if qs > qe else (qs <= h < qe)
 
 DRY_RUN = os.environ.get("DRY_RUN", "true").lower() != "false"
 
@@ -67,7 +60,6 @@ NIGHT_BUMP = float(os.environ.get("NIGHT_BUMP", "1.5"))  # di notte (23-7) alza 
 # Risveglio cameretta: ora (decimale) di riaccensione al mattino dopo la fascia notturna.
 WAKE_NORMAL = float(os.environ.get("WAKE_HOUR", "9.5"))       # feriali → 09:30
 WAKE_HOME = float(os.environ.get("WAKE_HOUR_HOME", "12.0"))   # weekend/festivi → 12:00 (si dorme)
-HARD_QUIET_END = float(os.environ.get("HARD_QUIET_END", "7.0"))  # 22:00→07:00 spegnimento ASSOLUTO; dopo, coda scavalcabile a mano
 HOLD_SECONDS = int(float(os.environ.get("HOLD_HOURS", "1")) * 3600)  # blocco manuale: dopo un cambio a mano, l'automatismo si ferma per N ore
 AUTOSTATE_FILE = "autostate.json"  # memoria di cosa ha impostato l'automatismo + scadenza blocco manuale (nel repo)
 EMERGENCY_FILE = "emergency.json"  # lockout 24h: {"mode":"off"/"safe"/"none","until":<epoch>} (scritto dal bot/emergency.yml)
@@ -262,6 +254,12 @@ def main():
         autostate = load_autostate()
         now_ts = now_it().timestamp()
 
+        # Notifica quando un'emergenza è APPENA scaduta (transizione attiva → spenta)
+        if autostate.get("_emergency") in ("off", "safe") and emerg is None:
+            notify("✅ Emergenza terminata: l'automatismo del clima è ripreso normalmente.")
+        autostate["_emergency"] = emerg or "none"
+        emergency_reverted = False  # True se l'emergenza ha dovuto rimettere a posto una mossa manuale
+
         for room in ROOMS:
             dsn = room["dsn"]
             r = readings.get(room["sensor"])
@@ -275,24 +273,24 @@ def main():
             print(f"\n[{room['name']}] reale={temp:.1f}°C | clima: {MODE.get(cur_mode)} @ {cur_sp:.1f}°C")
             st = autostate.get(dsn, {})
             q = room.get("quiet")
+            in_quiet = bool(q) and in_quiet_window(now_it().hour + now_it().minute / 60,
+                                                   wake_hour_for(now_it().date()))
 
             # EMERGENZA — lockout deliberato 24h: vince su TUTTO (presenza, target, blocco manuale, notte).
             if emerg == "off":
                 if cur_mode != 0:
                     print("   🆘 emergenza: spengo")
                     if not DRY_RUN: fg_set(H, p["operation_mode"]["key"], 0)
-                    actions.append(f"{room['name']}: 🆘 spento")
+                    emergency_reverted = True
                 autostate[dsn] = {"mode": 0, "sp": cur_sp_raw, "hold_until": 0}
                 continue
             if emerg == "safe":
                 # cameretta nelle sue ore notturne resta comunque spenta (Eva dorme)
-                in_quiet = bool(q) and quiet_phase(now_it().hour + now_it().minute / 60,
-                                                   wake_hour_for(now_it().date()), HARD_QUIET_END) is not None
                 if in_quiet:
                     if cur_mode != 0:
                         print("   🆘 sicura + notte cameretta → spengo")
                         if not DRY_RUN: fg_set(H, p["operation_mode"]["key"], 0)
-                        actions.append(f"{room['name']}: 🆘 notte → spento")
+                        emergency_reverted = True
                     autostate[dsn] = {"mode": 0, "sp": cur_sp_raw, "hold_until": 0}
                     continue
                 # cool gentile: 26°, ventola silenziosa, alette in alto, niente oscillazione
@@ -314,25 +312,13 @@ def main():
                     if not DRY_RUN: fg_set(H, p["af_vertical_direction"]["key"], 1)
                 if changed:
                     print(f"   🆘 modalità sicura → {', '.join(changed)}")
-                    actions.append(f"{room['name']}: 🆘 sicura {SAFE_TARGET:g}°")
+                    emergency_reverted = True
                 autostate[dsn] = {"mode": COOL, "sp": sp_raw, "hold_until": 0}
                 continue
 
-            # SICUREZZA 1 — Fascia notturna cameretta. Sera fissa 22:00; risveglio 09:30 feriali / 12:00 weekend-festivi.
-            #  - notte profonda 22:00–07:00 ("hard"): spento ASSOLUTO, vince anche sul blocco manuale.
-            #  - coda mattutina 07:00→risveglio ("soft"): spento di default MA un cambio a mano la scavalca per HOLD_HOURS
-            #    (gestita più sotto, dopo il blocco manuale, così riusa la stessa logica di pausa).
-            phase = quiet_phase(now_it().hour + now_it().minute / 60,
-                                wake_hour_for(now_it().date()), HARD_QUIET_END) if q else None
-            if phase == "hard":
-                if cur_mode != 0:
-                    print("   notte profonda → spengo (assoluto)")
-                    if not DRY_RUN: fg_set(H, p["operation_mode"]["key"], 0)
-                    actions.append(f"{room['name']}: notte → spento")
-                else:
-                    print("   notte profonda, già spento")
-                autostate[dsn] = {"mode": 0, "sp": cur_sp_raw, "hold_until": 0}
-                continue
+            # FASCIA NOTTURNA CAMERETTA (sera 22:00 → risveglio 09:30 feriali / 12:00 weekend-festivi).
+            # Tutta la fascia è scavalcabile a mano: spenta di DEFAULT, ma una mossa manuale regge HOLD_HOURS
+            # (gestita più sotto, dopo il blocco manuale). 'in_quiet' è calcolato in cima al loop.
 
             # SICUREZZA 2 — Tutti fuori: spento (vince su tutto)
             if not anyone:
@@ -359,14 +345,14 @@ def main():
                 actions.append(f"{room['name']}: cambio manuale → pausa fino {until}")
                 continue
 
-            # CODA MATTUTINA (soft, 07:00→risveglio): nessun override manuale attivo → tieni spento come da fascia
-            if phase == "soft":
+            # FASCIA NOTTURNA cameretta: nessun override manuale attivo → tieni spento come da fascia
+            if in_quiet:
                 if cur_mode != 0:
-                    print("   coda mattutina → spengo (scavalcabile a mano)")
+                    print("   fascia notturna → spengo (scavalcabile a mano)")
                     if not DRY_RUN: fg_set(H, p["operation_mode"]["key"], 0)
-                    actions.append(f"{room['name']}: mattino → spento")
+                    actions.append(f"{room['name']}: notte → spento")
                 else:
-                    print("   coda mattutina, già spento")
+                    print("   fascia notturna, già spento")
                 autostate[dsn] = {"mode": 0, "sp": cur_sp_raw, "hold_until": 0}
                 continue
 
@@ -398,7 +384,13 @@ def main():
         if not DRY_RUN:
             save_autostate(autostate)
 
-        if actions:
+        if emergency_reverted:
+            until = datetime.fromtimestamp(float(em.get("until", 0)), TZ_ROME).strftime("%H:%M")
+            label = "Tutto spento" if emerg == "off" else "Modalità sicura"
+            notify(("[PROVA] " if DRY_RUN else "") +
+                   f"🆘 Emergenza «{label}» attiva fino alle {until}: ho riportato i climi allo stato di emergenza.\n"
+                   f"Per comandarli a mano premi ✅ Annulla SOS nel bot.")
+        elif actions:
             notify("🌡️ " + ("[PROVA] " if DRY_RUN else "") + " | ".join(actions))
         print("\nFine ciclo.")
     except Exception as e:
