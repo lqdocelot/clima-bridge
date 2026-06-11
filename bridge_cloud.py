@@ -57,15 +57,16 @@ DEADZONE = 0.3
 STEP = 0.5
 SETPOINT_MIN, SETPOINT_MAX = 20.0, 29.0
 MAX_DELTA = float(os.environ.get("MAX_DELTA", "6.0"))
-NIGHT_BUMP = float(os.environ.get("NIGHT_BUMP", "1.5"))  # di notte (23-7) alza il target nelle stanze senza fascia quiet (es. soggiorno)
-# Risveglio cameretta: ora (decimale) di riaccensione al mattino dopo la fascia notturna.
+# Umidità: vicino al target con aria umida si passa in dry; isteresi per non fare ping-pong.
+RH_DRY_ON = float(os.environ.get("RH_DRY_ON", "62"))    # % oltre cui passare in dry (se temp vicina al target)
+RH_DRY_OFF = float(os.environ.get("RH_DRY_OFF", "55"))  # % sotto cui tornare in cool
+# Risveglio: ora (decimale) di riaccensione al mattino dopo la fascia notturna.
 WAKE_NORMAL = float(os.environ.get("WAKE_HOUR", "9.5"))       # feriali → 09:30
 WAKE_HOME = float(os.environ.get("WAKE_HOUR_HOME", "12.0"))   # weekend/festivi → 12:00 (si dorme)
 HOLD_SECONDS = int(float(os.environ.get("HOLD_HOURS", "1")) * 3600)  # blocco manuale: dopo un cambio a mano, l'automatismo si ferma per N ore
 AUTOSTATE_FILE = "autostate.json"  # memoria di cosa ha impostato l'automatismo + scadenza blocco manuale (nel repo)
 EMERGENCY_FILE = "emergency.json"  # lockout 24h: {"mode":"off"/"safe"/"none","until":<epoch>} (scritto dal bot/emergency.yml)
 SAFE_TARGET = float(os.environ.get("SAFE_TARGET", "26"))  # setpoint cool gentile in "modalità sicura"
-RH_MAX = 60
 LAT, LON = 45.0703, 7.6869  # Torino (regolabile)
 
 # ---- FGLair ----
@@ -76,6 +77,7 @@ SET_URL = BASE + "properties/{key}/datapoints.json"
 APP_ID, APP_SECRET = "FGLair-eu-id", "FGLair-eu-gpFbVBRoiJ8E3QWJ-QRULLL3j3U"
 MODE = {0: "off", 2: "auto", 3: "cool", 4: "dry", 5: "fan_only", 6: "heat"}
 COOL = 3
+DRY = 4
 FAN_QUIET = 0
 
 RES_TEMP, RES_HUM = "0.1.85", "0.2.85"
@@ -86,11 +88,12 @@ SENSOR_NAMES = {
     "lumi.158d008afda91f": "🛏️ Camera",
     "lumi.158d0008ab1164": "🚿 Bagno",
 }
+# quiet_from = ora (decimale) di spegnimento serale; il risveglio è dinamico per tutti
+# (feriali WAKE_NORMAL=09:30, weekend/festivi WAKE_HOME=12:00 — vedi wake_hour_for()).
+# Nella fascia la stanza è spenta di default ma una mossa manuale regge HOLD_HOURS.
 ROOMS = [
-    {"name": "SOGGIORNO", "dsn": "AC000W002919142", "sensor": "lumi.158d008afda8d2"},
-    # CAMERA = cameretta di Eva: spento la notte; riaccensione mattutina dinamica
-    # (feriali WAKE_NORMAL=09:30, weekend/festivi WAKE_HOME=12:00). Vedi wake_hour_for().
-    {"name": "CAMERA",    "dsn": "AC000W002919128", "sensor": "lumi.158d0008974abd", "quiet": (22, WAKE_NORMAL)},
+    {"name": "SOGGIORNO", "dsn": "AC000W002919142", "sensor": "lumi.158d008afda8d2", "quiet_from": 23},
+    {"name": "CAMERA",    "dsn": "AC000W002919128", "sensor": "lumi.158d0008974abd", "quiet_from": 22},
 ]
 
 TG_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
@@ -251,9 +254,9 @@ def control_room(room, readings, H, autostate, actions, emerg, anyone, target, n
     cur_sp = cur_sp_raw / 10
     print(f"\n[{room['name']}] reale={temp:.1f}°C | clima: {MODE.get(cur_mode)} @ {cur_sp:.1f}°C")
     st = autostate.get(dsn, {})
-    q = room.get("quiet")
-    in_quiet = bool(q) and in_quiet_window(now_it().hour + now_it().minute / 60,
-                                           wake_hour_for(now_it().date()))
+    q = room.get("quiet_from")
+    in_quiet = q is not None and in_quiet_window(now_it().hour + now_it().minute / 60,
+                                                 wake_hour_for(now_it().date()), qs=q)
 
     # EMERGENZA — lockout deliberato 24h: vince su TUTTO (presenza, target, blocco manuale, notte).
     if emerg == "off":
@@ -314,8 +317,10 @@ def control_room(room, readings, H, autostate, actions, emerg, anyone, target, n
         until = datetime.fromtimestamp(st["hold_until"], TZ_ROME).strftime("%H:%M")
         print(f"   blocco manuale attivo fino alle {until} → non intervengo")
         return False
-    # rilevo un cambio fatto a MANO (telecomando o bot): stato diverso da quello che avevo impostato io
-    if st.get("mode") is not None and (cur_mode != st["mode"] or cur_sp_raw != st["sp"]):
+    # rilevo un cambio fatto a MANO (telecomando o bot): stato diverso da quello che avevo impostato io.
+    # In dry il clima può riportare un setpoint suo → lì confronto solo il modo (niente falsi blocchi).
+    if st.get("mode") is not None and (cur_mode != st["mode"]
+                                       or (st["mode"] != DRY and cur_sp_raw != st["sp"])):
         until_ts = now_ts + HOLD_SECONDS
         autostate[dsn] = {"mode": cur_mode, "sp": cur_sp_raw, "hold_until": until_ts}
         until = datetime.fromtimestamp(until_ts, TZ_ROME).strftime("%H:%M")
@@ -334,12 +339,37 @@ def control_room(room, readings, H, autostate, actions, emerg, anyone, target, n
         autostate[dsn] = {"mode": 0, "sp": cur_sp_raw, "hold_until": 0}
         return False
 
-    # CONTROLLO DOLCE verso il target (con setback notturno per stanze senza quiet)
+    # CONTROLLO DOLCE verso il target
     room_target = target
-    if not q and (23 <= now_it().hour or now_it().hour < 7):
-        room_target = target + NIGHT_BUMP
-        print(f"   (notte: target soggiorno {room_target:.1f}°C)")
     error = temp - room_target
+    hum = r.get("hum")
+
+    # GESTIONE UMIDITÀ — solo qui (mai in emergenza/notte/fuori/blocco manuale).
+    if cur_mode == DRY and st.get("mode") == DRY:
+        # il dry l'abbiamo messo noi: torna cool se l'aria è asciutta o la stanza si è riscaldata
+        if (hum is not None and hum <= RH_DRY_OFF) or error >= 1.0:
+            new_sp = min(SETPOINT_MAX, max(SETPOINT_MIN, round_half(room_target)))
+            why = "umidità ok" if (hum is not None and hum <= RH_DRY_OFF) else "temperatura risalita"
+            print(f"   💧→❄️ {why} → torno cool {new_sp:.1f}°C")
+            if not DRY_RUN:
+                fg_set(H, p["operation_mode"]["key"], COOL)
+                fg_set(H, p["fan_speed"]["key"], FAN_QUIET)
+                fg_set(H, p["adjust_temperature"]["key"], int(new_sp * 10))
+                actions.append(f"{room['name']}: {why} → cool {new_sp:.1f}°C")
+            autostate[dsn] = {"mode": COOL, "sp": int(new_sp * 10), "hold_until": 0}
+        else:
+            print(f"   💧 dry attivo (umidità {hum:.0f}%)" if hum is not None else "   💧 dry attivo")
+            autostate[dsn] = {"mode": DRY, "sp": cur_sp_raw, "hold_until": 0}
+        return False
+    if cur_mode == COOL and hum is not None and hum >= RH_DRY_ON and error <= 0.5:
+        print(f"   ❄️→💧 vicino al target ma umidità {hum:.0f}% → dry")
+        if not DRY_RUN:
+            fg_set(H, p["operation_mode"]["key"], DRY)
+            fg_set(H, p["fan_speed"]["key"], FAN_QUIET)
+            actions.append(f"{room['name']}: umidità {hum:.0f}% → dry")
+        autostate[dsn] = {"mode": DRY, "sp": cur_sp_raw, "hold_until": 0}
+        return False
+
     if cur_mode != COOL:
         new_sp = min(SETPOINT_MAX, max(SETPOINT_MIN, round_half(room_target)))
         print(f"   avvio cool {new_sp:.1f}°C")

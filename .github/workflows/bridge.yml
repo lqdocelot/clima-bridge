@@ -32,8 +32,9 @@ jobs:
           TARGET: ${{ vars.TARGET || '25' }}                # target normale (solo adulto a casa)
           TARGET_SOFT: ${{ vars.TARGET_SOFT || '25' }}      # target soft quando ci sono i bimbi (Jessica a casa)
           MAX_DELTA: ${{ vars.MAX_DELTA || '6' }}           # Δ max interno-esterno (anti shock termico)
-          NIGHT_BUMP: ${{ vars.NIGHT_BUMP || '1.5' }}       # setback notturno soggiorno (23-7)
           HOLD_HOURS: ${{ vars.HOLD_HOURS || '1' }}         # blocco manuale: pausa automatismo dopo un cambio a mano
+          RH_DRY_ON: ${{ vars.RH_DRY_ON || '62' }}           # umidità % oltre cui passare in dry (temp vicina al target)
+          RH_DRY_OFF: ${{ vars.RH_DRY_OFF || '55' }}         # umidità % sotto cui tornare in cool
           WAKE_HOUR: ${{ vars.WAKE_HOUR || '9.5' }}          # cameretta: riaccensione mattutina feriali (09:30)
           WAKE_HOUR_HOME: ${{ vars.WAKE_HOUR_HOME || '12' }} # cameretta: riaccensione weekend/festivi (12:00)
           SAFE_TARGET: ${{ vars.SAFE_TARGET || '26' }}        # emergenza 'modalità sicura': setpoint cool gentile
