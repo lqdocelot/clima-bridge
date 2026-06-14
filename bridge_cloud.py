@@ -243,16 +243,23 @@ def control_room(room, readings, H, autostate, actions, emerg, anyone, target, n
     """Gestisce UNA stanza, isolata: un errore qui viene catturato dal chiamante e non
     blocca le altre stanze. Ritorna True se l'EMERGENZA ha rimesso a posto una mossa manuale."""
     dsn = room["dsn"]
-    r = readings.get(room["sensor"])
-    if not r:
-        print(f"[{room['name']}] sensore non letto, salto.")
-        return False
-    temp = r["temp"]
     p = fg_props(H, dsn)
     cur_mode = p["operation_mode"]["value"]
     cur_sp_raw = p["adjust_temperature"]["value"]
     cur_sp = cur_sp_raw / 10
-    print(f"\n[{room['name']}] reale={temp:.1f}°C | clima: {MODE.get(cur_mode)} @ {cur_sp:.1f}°C")
+    r = readings.get(room["sensor"])
+    if r:
+        temp = r["temp"]; hum = r.get("hum"); src = "Aqara"
+    else:
+        # FALLBACK: Aqara non disponibile → temperatura interna del clima (display_temperature),
+        # decodifica (val-5000)/100. Niente umidità → la logica dry resta disattivata.
+        dt = p.get("display_temperature", {}).get("value")
+        temp = (dt - 5000) / 100 if dt else None
+        hum = None; src = "clima"
+        if temp is None:
+            print(f"[{room['name']}] nessuna temperatura (Aqara giù + display assente), salto.")
+            return False
+    print(f"\n[{room['name']}] reale={temp:.1f}°C ({src}) | clima: {MODE.get(cur_mode)} @ {cur_sp:.1f}°C")
     st = autostate.get(dsn, {})
     q = room.get("quiet_from")
     in_quiet = q is not None and in_quiet_window(now_it().hour + now_it().minute / 60,
@@ -342,9 +349,8 @@ def control_room(room, readings, H, autostate, actions, emerg, anyone, target, n
     # CONTROLLO DOLCE verso il target
     room_target = target
     error = temp - room_target
-    hum = r.get("hum")
 
-    # GESTIONE UMIDITÀ — solo qui (mai in emergenza/notte/fuori/blocco manuale).
+    # GESTIONE UMIDITÀ — solo qui (mai in emergenza/notte/fuori/blocco manuale); 'hum' può essere None in fallback.
     if cur_mode == DRY and st.get("mode") == DRY:
         # il dry l'abbiamo messo noi: torna cool se l'aria è asciutta o la stanza si è riscaldata
         if (hum is not None and hum <= RH_DRY_OFF) or error >= 1.0:
@@ -408,8 +414,13 @@ def main():
             until = datetime.fromtimestamp(float(em.get("until", 0)), TZ_ROME).strftime("%d/%m %H:%M")
             print(f"🆘 EMERGENZA ATTIVA: {emerg} (fino a {until}) — bypass dell'automatismo normale")
 
-        readings = with_retry(aqara_readings, what="lettura Aqara")
-        print("Aqara:", {k[-6:]: f"{v['temp']:.1f}°C/{v['hum']:.0f}%" if v['hum'] else f"{v['temp']:.1f}°C" for k, v in readings.items()})
+        try:
+            readings = with_retry(aqara_readings, what="lettura Aqara")
+            aqara_ok = True
+            print("Aqara:", {k[-6:]: f"{v['temp']:.1f}°C/{v['hum']:.0f}%" if v['hum'] else f"{v['temp']:.1f}°C" for k, v in readings.items()})
+        except Exception as e:
+            readings = {}; aqara_ok = False
+            print(f"⚠️ Aqara non raggiungibile ({e}) → fallback temperatura interna clima")
 
         # pubblica temperature/umidità per il bot Telegram (sensors.json nel repo)
         try:
@@ -432,6 +443,14 @@ def main():
         if autostate.get("_emergency") in ("off", "safe") and emerg is None:
             notify("✅ Emergenza terminata: l'automatismo del clima è ripreso normalmente.")
         autostate["_emergency"] = emerg or "none"
+
+        # Notifica una sola volta l'ingresso/uscita dalla modalità degradata (Aqara giù → sensore interno clima)
+        if not aqara_ok and not autostate.get("_aqara_down"):
+            notify("⚠️ Sensori Aqara non raggiungibili: uso la temperatura interna dei condizionatori "
+                   "(niente umidità/dry, niente monitoraggio Camera/Bagno) finché non tornano.")
+        elif aqara_ok and autostate.get("_aqara_down"):
+            notify("✅ Sensori Aqara di nuovo raggiungibili.")
+        autostate["_aqara_down"] = (not aqara_ok)
         emergency_reverted = False  # True se l'emergenza ha dovuto rimettere a posto una mossa manuale
 
         # Stanze gestite in ISOLAMENTO: un errore (es. blip cloud Ayla su un dsn)
