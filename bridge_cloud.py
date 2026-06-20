@@ -99,6 +99,10 @@ ROOMS = [
 TG_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 TG_CHAT = os.environ.get("TELEGRAM_CHAT_ID", "")
 PRESENCE_URL = os.environ.get("PRESENCE_URL", "")
+# Interruttore presenza: se 'false' il ponte ignora presence.json e assume sempre "casa"
+# (nessuno spegnimento per 'tutti fuori'). Disattivata finché non c'è un aggiornatore
+# automatico affidabile (automazione WiFi sui telefoni). Riattivare con repo Variable.
+PRESENCE_ENABLED = os.environ.get("PRESENCE_ENABLED", "true").lower() != "false"
 
 
 def notify(text):
@@ -406,11 +410,15 @@ def main():
     actions = []
     print(f"== Ponte CLOUD @ {now_it():%H:%M} IT (DRY_RUN={DRY_RUN}) ==")
     try:
-        anyone, kids = read_presence()
+        if PRESENCE_ENABLED:
+            anyone, kids = read_presence()
+        else:
+            anyone, kids = True, False   # presenza disattivata → sempre "casa", controllo normale
         base = TARGET_SOFT if kids else BASE_TARGET
         out = outdoor_temp()
         target = base if out is None else max(base, out - MAX_DELTA)
-        stato = "tutti fuori" if not anyone else ("Jessica/bimbi a casa (soft)" if kids else "solo adulto a casa")
+        stato = ("presenza disattivata (sempre casa)" if not PRESENCE_ENABLED else
+                 ("tutti fuori" if not anyone else ("Jessica/bimbi a casa (soft)" if kids else "solo adulto a casa")))
         print(f"Presenza: {stato} | esterno: {out}°C | target: {target:.1f}°C")
 
         em = load_emergency()

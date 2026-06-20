@@ -29,6 +29,7 @@ jobs:
           TZ: Europe/Rome                                   # ora locale italiana (le fasce orarie sono in ora IT)
           DRY_RUN: ${{ vars.DRY_RUN || 'true' }}          # default sicuro; metti la variabile DRY_RUN=false per agire
           PRESENCE_URL: ${{ vars.PRESENCE_URL }}            # flag presenza (raw di presence.json)
+          PRESENCE_ENABLED: ${{ vars.PRESENCE_ENABLED || 'false' }}  # presenza disattivata finché non c'è l'automazione WiFi (riattiva: Variable=true)
           TARGET: ${{ vars.TARGET || '25' }}                # target normale (solo adulto a casa)
           TARGET_SOFT: ${{ vars.TARGET_SOFT || '25' }}      # target soft quando ci sono i bimbi (Jessica a casa)
           MAX_DELTA: ${{ vars.MAX_DELTA || '6' }}           # Δ max interno-esterno (anti shock termico)
