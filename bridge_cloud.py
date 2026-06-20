@@ -118,15 +118,20 @@ def round_half(x):
 _RETRY_SLEEP = 8  # secondi tra i tentativi di rete (azzerato nei test)
 
 
+# Errori di rete TRANSITORI da ritentare: timeout, connessione, e risposta vuota/non-JSON
+# (il cloud Ayla/Aqara ogni tanto risponde HTML/vuoto → .json() solleva JSONDecodeError).
+# NON si ritenta su RuntimeError (credenziali/login rifiutato): FGLair blocca dopo 5 tentativi.
+TRANSIENT = (requests.exceptions.Timeout, requests.exceptions.ConnectionError,
+             requests.exceptions.JSONDecodeError)
+
+
 def with_retry(fn, tries=3, what=""):
-    """Riprova fn SOLO su errori di rete transitori (timeout/connessione): il cloud Ayla
-    ogni tanto non risponde (visto run 10/06 06:45, read timeout sul login) e un blip
-    non deve abortire il giro. MAI retry su errori di credenziali: FGLair blocca
-    l'account dopo 5 login falliti."""
+    """Riprova fn solo sugli errori transitori (vedi TRANSIENT). Visto: read timeout sul
+    login (10/06) e risposta non-JSON dal login FGLair (20/06 07:30)."""
     for i in range(tries):
         try:
             return fn()
-        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
+        except TRANSIENT as e:
             if i == tries - 1:
                 raise
             print(f"   rete instabile ({what}): {type(e).__name__} — riprovo tra {_RETRY_SLEEP}s [{i + 1}/{tries - 1}]")
