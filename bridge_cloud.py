@@ -187,14 +187,19 @@ def fg_login():
 
 
 def fg_props(H, dsn):
-    data = requests.get(PROPS_URL.format(dsn=dsn), headers=H, timeout=15).json()
-    return {p["property"]["name"]: {"key": p["property"]["key"], "value": p["property"]["value"]}
-            for p in data if isinstance(p, dict) and "property" in p}
+    # auto-ritenta sui blip transitori del cloud Ayla (read timeout, risposta non-JSON)
+    def _go():
+        data = requests.get(PROPS_URL.format(dsn=dsn), headers=H, timeout=20).json()
+        return {p["property"]["name"]: {"key": p["property"]["key"], "value": p["property"]["value"]}
+                for p in data if isinstance(p, dict) and "property" in p}
+    return with_retry(_go, what=f"props {dsn[-4:]}")
 
 
 def fg_set(H, key, value):
-    return requests.post(SET_URL.format(key=key), headers=H,
-                         data=json.dumps({"datapoint": {"value": str(value)}}), timeout=15).status_code
+    def _go():
+        return requests.post(SET_URL.format(key=key), headers=H,
+                             data=json.dumps({"datapoint": {"value": str(value)}}), timeout=20).status_code
+    return with_retry(_go, what="set")
 
 
 def load_emergency():
