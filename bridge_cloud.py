@@ -91,9 +91,11 @@ SENSOR_NAMES = {
 # quiet_from = ora (decimale) di spegnimento serale; il risveglio è dinamico per tutti
 # (feriali WAKE_NORMAL=09:30, weekend/festivi WAKE_HOME=12:00 — vedi wake_hour_for()).
 # Nella fascia la stanza è spenta di default ma una mossa manuale regge HOLD_HOURS.
+# sleep_in=True → risveglio posticipato nel weekend/festivi (WAKE_HOME, es. 12:00); altrimenti
+# risveglio sempre WAKE_NORMAL (09:30) anche nel weekend. La cameretta di Eva dorme, il salotto no.
 ROOMS = [
-    {"name": "SOGGIORNO", "dsn": "AC000W002919142", "sensor": "lumi.158d008afda8d2", "quiet_from": 23},
-    {"name": "CAMERA",    "dsn": "AC000W002919128", "sensor": "lumi.158d0008974abd", "quiet_from": 22},
+    {"name": "SOGGIORNO", "dsn": "AC000W002919142", "sensor": "lumi.158d008afda8d2", "quiet_from": 23, "sleep_in": False},
+    {"name": "CAMERA",    "dsn": "AC000W002919128", "sensor": "lumi.158d0008974abd", "quiet_from": 22, "sleep_in": True},
 ]
 
 TG_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
@@ -271,8 +273,9 @@ def control_room(room, readings, H, autostate, actions, emerg, anyone, target, n
     print(f"\n[{room['name']}] reale={temp:.1f}°C ({src}) | clima: {MODE.get(cur_mode)} @ {cur_sp:.1f}°C")
     st = autostate.get(dsn, {})
     q = room.get("quiet_from")
-    in_quiet = q is not None and in_quiet_window(now_it().hour + now_it().minute / 60,
-                                                 wake_hour_for(now_it().date()), qs=q)
+    # risveglio: posticipato weekend solo per le stanze 'sleep_in' (cameretta); il soggiorno torna sempre a WAKE_NORMAL
+    qe = wake_hour_for(now_it().date()) if room.get("sleep_in") else WAKE_NORMAL
+    in_quiet = q is not None and in_quiet_window(now_it().hour + now_it().minute / 60, qe, qs=q)
 
     # EMERGENZA — lockout deliberato 24h: vince su TUTTO (presenza, target, blocco manuale, notte).
     if emerg == "off":
