@@ -1,0 +1,39 @@
+name: comfort
+
+# ▶️ Comfort = "riprendi automatico": azzera l'emergenza e TUTTI gli override manuali,
+# così l'automatismo torna a gestire tutto. Invocabile col Token-B (Actions:write).
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  resume:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Riprendi automatico (azzera emergenza + override)
+        run: |
+          python3 - <<'PY'
+          import json
+          json.dump({"mode": "none", "until": 0}, open("emergency.json", "w"))
+          try:
+              a = json.load(open("autostate.json"))
+          except Exception:
+              a = {}
+          for v in a.values():
+              if isinstance(v, dict) and "manual" in v:
+                  v["manual"] = False
+          json.dump(a, open("autostate.json", "w"))
+          print("comfort: emergenza azzerata, override manuali rimossi")
+          PY
+      - name: Commit
+        run: |
+          git config user.name clima
+          git config user.email clima@local
+          git add emergency.json autostate.json
+          git commit -m "comfort: riprendi automatico" || echo "nessun cambiamento"
+          for i in 1 2 3; do
+            git pull --rebase --autostash && git push && break || sleep 4
+          done

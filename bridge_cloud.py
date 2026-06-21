@@ -15,57 +15,37 @@ import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-import holidays
 import requests
 from aqara_iot import AqaraOpenAPI, AqaraDeviceManager
 
 TZ_ROME = ZoneInfo("Europe/Rome")  # ora locale italiana, esplicita (il runner GitHub è UTC)
-
-# Festività nazionali IT (mobili incluse, es. Pasquetta). L'oggetto espande gli anni al volo.
-_IT_HOLIDAYS = holidays.Italy()
 
 
 def now_it():
     return datetime.now(TZ_ROME)
 
 
-def is_home_day(d):
-    """True se 'd' è un giorno in cui probabilmente si dorme/si è a casa al mattino:
-    weekend (sab/dom) o festivo nazionale italiano."""
-    return d.weekday() >= 5 or d in _IT_HOLIDAYS
-
-
-def wake_hour_for(d):
-    """Ora (decimale, es. 9.5 = 09:30) in cui il clima della cameretta può riaccendersi
-    al mattino: feriale → WAKE_NORMAL, weekend/festivi → WAKE_HOME (più tardi)."""
-    return WAKE_HOME if is_home_day(d) else WAKE_NORMAL
-
-
-def in_quiet_window(h, qe, qs=22):
-    """True se l'ora decimale h è nella fascia di spegnimento cameretta [qs..qe).
-    qs = sera (22), qe = risveglio (9.5 feriali, 12 weekend-festivi). Gestisce il wrap a mezzanotte.
-    Nella fascia la cameretta è spenta di DEFAULT, ma una mossa manuale la scavalca per HOLD_HOURS
-    (gestito dal blocco manuale). Non c'è più una sotto-fascia 'assoluta'."""
-    return (qs <= h or h < qe) if qs > qe else (qs <= h < qe)
+def in_window(h, start, end):
+    """True se l'ora decimale h è in [start..end), con wrap a mezzanotte (es. 22→8)."""
+    return (start <= h or h < end) if start > end else (start <= h < end)
 
 DRY_RUN = os.environ.get("DRY_RUN", "true").lower() != "false"
 
-# ---- Comfort (tarabili anche da env) ----
-BASE_TARGET = float(os.environ.get("TARGET", "25.0"))      # target normale (solo adulto a casa)
-TARGET_SOFT = float(os.environ.get("TARGET_SOFT", "25.0"))  # target gentile quando ci sono i bimbi (Jessica a casa)
+# ---- Comfort v2 (tarabili da env/Variables) ----
+COMFORT_TARGET = float(os.environ.get("TARGET", "25.0"))   # comfort dolce, sempre
 DEADZONE = 0.3
 STEP = 0.5
 SETPOINT_MIN, SETPOINT_MAX = 20.0, 29.0
-MAX_DELTA = float(os.environ.get("MAX_DELTA", "6.0"))
+MAX_DELTA = float(os.environ.get("MAX_DELTA", "6.0"))      # cap Δ interno-esterno (anti shock termico)
+MAINTENANCE_MAX = float(os.environ.get("MAINTENANCE_MAX", "28.0"))  # via di casa: raffresca solo sopra questa
 # Umidità: vicino al target con aria umida si passa in dry; isteresi per non fare ping-pong.
 RH_DRY_ON = float(os.environ.get("RH_DRY_ON", "62"))    # % oltre cui passare in dry (se temp vicina al target)
 RH_DRY_OFF = float(os.environ.get("RH_DRY_OFF", "55"))  # % sotto cui tornare in cool
-# Risveglio: ora (decimale) di riaccensione al mattino dopo la fascia notturna.
-WAKE_NORMAL = float(os.environ.get("WAKE_HOUR", "9.5"))       # feriali → 09:30
-WAKE_HOME = float(os.environ.get("WAKE_HOUR_HOME", "12.0"))   # weekend/festivi → 12:00 (si dorme)
-HOLD_SECONDS = int(float(os.environ.get("HOLD_HOURS", "1")) * 3600)  # blocco manuale: dopo un cambio a mano, l'automatismo si ferma per N ore
-AUTOSTATE_FILE = "autostate.json"  # memoria di cosa ha impostato l'automatismo + scadenza blocco manuale (nel repo)
-EMERGENCY_FILE = "emergency.json"  # lockout 24h: {"mode":"off"/"safe"/"none","until":<epoch>} (scritto dal bot/emergency.yml)
+# Cameretta: di notte solo ventilazione (muove aria, non raffredda). Scavalcabile a mano.
+NIGHT_FROM = float(os.environ.get("NIGHT_FROM", "22"))
+NIGHT_TO = float(os.environ.get("NIGHT_TO", "8"))
+AUTOSTATE_FILE = "autostate.json"  # memoria di cosa ha impostato l'automatismo + flag override manuale (nel repo)
+EMERGENCY_FILE = "emergency.json"  # lockout 24h: {"mode":"off"/"safe"/"none","until":<epoch>}
 SAFE_TARGET = float(os.environ.get("SAFE_TARGET", "26"))  # setpoint cool gentile in "modalità sicura"
 LAT, LON = 45.0703, 7.6869  # Torino (regolabile)
 
@@ -76,8 +56,10 @@ PROPS_URL = BASE + "dsns/{dsn}/properties.json"
 SET_URL = BASE + "properties/{key}/datapoints.json"
 APP_ID, APP_SECRET = "FGLair-eu-id", "FGLair-eu-gpFbVBRoiJ8E3QWJ-QRULLL3j3U"
 MODE = {0: "off", 2: "auto", 3: "cool", 4: "dry", 5: "fan_only", 6: "heat"}
+OFF = 0
 COOL = 3
 DRY = 4
+FAN_ONLY = 5
 FAN_QUIET = 0
 
 RES_TEMP, RES_HUM = "0.1.85", "0.2.85"
@@ -88,14 +70,11 @@ SENSOR_NAMES = {
     "lumi.158d008afda91f": "🛏️ Camera",
     "lumi.158d0008ab1164": "🚿 Bagno",
 }
-# quiet_from = ora (decimale) di spegnimento serale; il risveglio è dinamico per tutti
-# (feriali WAKE_NORMAL=09:30, weekend/festivi WAKE_HOME=12:00 — vedi wake_hour_for()).
-# Nella fascia la stanza è spenta di default ma una mossa manuale regge HOLD_HOURS.
-# sleep_in=True → risveglio posticipato nel weekend/festivi (WAKE_HOME, es. 12:00); altrimenti
-# risveglio sempre WAKE_NORMAL (09:30) anche nel weekend. La cameretta di Eva dorme, il salotto no.
+# night_fan=True → di notte (NIGHT_FROM→NIGHT_TO) la stanza va in sola ventilazione (cameretta Eva).
+# Il soggiorno non ce l'ha → comfort h24.
 ROOMS = [
-    {"name": "SOGGIORNO", "dsn": "AC000W002919142", "sensor": "lumi.158d008afda8d2", "quiet_from": 23, "sleep_in": False},
-    {"name": "CAMERA",    "dsn": "AC000W002919128", "sensor": "lumi.158d0008974abd", "quiet_from": 22, "sleep_in": True},
+    {"name": "SOGGIORNO", "dsn": "AC000W002919142", "sensor": "lumi.158d008afda8d2"},
+    {"name": "CAMERA",    "dsn": "AC000W002919128", "sensor": "lumi.158d0008974abd", "night_fan": True},
 ]
 
 TG_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
@@ -250,9 +229,10 @@ def save_autostate(d):
     json.dump(d, open(AUTOSTATE_FILE, "w"))
 
 
-def control_room(room, readings, H, autostate, actions, emerg, anyone, target, now_ts):
-    """Gestisce UNA stanza, isolata: un errore qui viene catturato dal chiamante e non
-    blocca le altre stanze. Ritorna True se l'EMERGENZA ha rimesso a posto una mossa manuale."""
+def control_room(room, readings, H, autostate, actions, emerg, away, target):
+    """Gestisce UNA stanza, isolata. Gerarchia: EMERGENZA > OVERRIDE MANUALE (sticky, fino a
+    ▶️ Comfort) > NOTTE cameretta (solo ventola) > VIA di casa (mantenimento) > COMFORT dolce+dry.
+    Ritorna True se l'EMERGENZA ha dovuto rimettere a posto una mossa manuale."""
     dsn = room["dsn"]
     p = fg_props(H, dsn)
     cur_mode = p["operation_mode"]["value"]
@@ -262,8 +242,7 @@ def control_room(room, readings, H, autostate, actions, emerg, anyone, target, n
     if r:
         temp = r["temp"]; hum = r.get("hum"); src = "Aqara"
     else:
-        # FALLBACK: Aqara non disponibile → temperatura interna del clima (display_temperature),
-        # decodifica (val-5000)/100. Niente umidità → la logica dry resta disattivata.
+        # FALLBACK: Aqara giù → temperatura interna del clima (display_temperature); niente umidità.
         dt = p.get("display_temperature", {}).get("value")
         temp = (dt - 5000) / 100 if dt else None
         hum = None; src = "clima"
@@ -272,31 +251,20 @@ def control_room(room, readings, H, autostate, actions, emerg, anyone, target, n
             return False
     print(f"\n[{room['name']}] reale={temp:.1f}°C ({src}) | clima: {MODE.get(cur_mode)} @ {cur_sp:.1f}°C")
     st = autostate.get(dsn, {})
-    q = room.get("quiet_from")
-    # risveglio: posticipato weekend solo per le stanze 'sleep_in' (cameretta); il soggiorno torna sempre a WAKE_NORMAL
-    qe = wake_hour_for(now_it().date()) if room.get("sleep_in") else WAKE_NORMAL
-    in_quiet = q is not None and in_quiet_window(now_it().hour + now_it().minute / 60, qe, qs=q)
 
-    # EMERGENZA — lockout deliberato 24h: vince su TUTTO (presenza, target, blocco manuale, notte).
+    def remember(mode, sp_raw, manual=False):
+        autostate[dsn] = {"mode": mode, "sp": sp_raw, "manual": manual}
+
+    # 1) EMERGENZA (off/safe) — vince su tutto. Ritorna True se ha annullato una mossa manuale.
     if emerg == "off":
-        reverted = cur_mode != 0
+        reverted = cur_mode != OFF
         if reverted:
             print("   🆘 emergenza: spengo")
-            if not DRY_RUN: fg_set(H, p["operation_mode"]["key"], 0)
-        autostate[dsn] = {"mode": 0, "sp": cur_sp_raw, "hold_until": 0}
+            if not DRY_RUN: fg_set(H, p["operation_mode"]["key"], OFF)
+        remember(OFF, cur_sp_raw)
         return reverted
     if emerg == "safe":
-        # cameretta nelle sue ore notturne resta comunque spenta (Eva dorme)
-        if in_quiet:
-            reverted = cur_mode != 0
-            if reverted:
-                print("   🆘 sicura + notte cameretta → spengo")
-                if not DRY_RUN: fg_set(H, p["operation_mode"]["key"], 0)
-            autostate[dsn] = {"mode": 0, "sp": cur_sp_raw, "hold_until": 0}
-            return reverted
-        # cool gentile: 26°, ventola silenziosa, alette in alto, niente oscillazione
-        sp_raw = int(SAFE_TARGET * 10)
-        changed = []
+        sp_raw = int(SAFE_TARGET * 10); changed = []
         if cur_mode != COOL:
             if not DRY_RUN: fg_set(H, p["operation_mode"]["key"], COOL)
             changed.append("cool")
@@ -313,60 +281,60 @@ def control_room(room, readings, H, autostate, actions, emerg, anyone, target, n
             if not DRY_RUN: fg_set(H, p["af_vertical_direction"]["key"], 1)
         if changed:
             print(f"   🆘 modalità sicura → {', '.join(changed)}")
-        autostate[dsn] = {"mode": COOL, "sp": sp_raw, "hold_until": 0}
+        remember(COOL, sp_raw)
         return bool(changed)
 
-    # FASCIA NOTTURNA CAMERETTA (sera 22:00 → risveglio 09:30 feriali / 12:00 weekend-festivi).
-    # Tutta la fascia è scavalcabile a mano: spenta di DEFAULT, ma una mossa manuale regge HOLD_HOURS
-    # (gestita più sotto, dopo il blocco manuale). 'in_quiet' è calcolato sopra.
-
-    # SICUREZZA — Tutti fuori: spento (vince su tutto tranne l'emergenza)
-    if not anyone:
-        if cur_mode != 0:
-            print("   tutti fuori → spengo")
-            if not DRY_RUN: fg_set(H, p["operation_mode"]["key"], 0)
-            actions.append(f"{room['name']}: tutti fuori → spento")
-        else:
-            print("   tutti fuori, già spento")
-        autostate[dsn] = {"mode": 0, "sp": cur_sp_raw, "hold_until": 0}
+    # 2) OVERRIDE MANUALE STICKY — resta finché non si preme ▶️ Comfort (comfort.yml azzera il flag).
+    if st.get("manual"):
+        print("   ✋ override manuale attivo (▶️ Comfort per riprendere) → non intervengo")
         return False
-
-    # BLOCCO MANUALE — se attivo, non intervengo
-    if now_ts < st.get("hold_until", 0):
-        until = datetime.fromtimestamp(st["hold_until"], TZ_ROME).strftime("%H:%M")
-        print(f"   blocco manuale attivo fino alle {until} → non intervengo")
-        return False
-    # rilevo un cambio fatto a MANO (telecomando o bot): stato diverso da quello che avevo impostato io.
-    # In dry il clima può riportare un setpoint suo → lì confronto solo il modo (niente falsi blocchi).
+    # rilevo un cambio a mano (telecomando o bot): stato ≠ ultimo impostato dall'automatismo.
+    # In dry il clima riporta un setpoint suo → lì confronto solo il modo.
     if st.get("mode") is not None and (cur_mode != st["mode"]
                                        or (st["mode"] != DRY and cur_sp_raw != st["sp"])):
-        until_ts = now_ts + HOLD_SECONDS
-        autostate[dsn] = {"mode": cur_mode, "sp": cur_sp_raw, "hold_until": until_ts}
-        until = datetime.fromtimestamp(until_ts, TZ_ROME).strftime("%H:%M")
-        print(f"   cambio manuale rilevato → automatismo in pausa fino alle {until}")
-        actions.append(f"{room['name']}: cambio manuale → pausa fino {until}")
+        remember(cur_mode, cur_sp_raw, manual=True)
+        print("   ✋ cambio manuale → resta finché non premi ▶️ Comfort")
+        actions.append(f"{room['name']}: override manuale (resta fino a ▶️ Comfort)")
         return False
 
-    # FASCIA NOTTURNA cameretta: nessun override manuale attivo → tieni spento come da fascia
-    if in_quiet:
-        if cur_mode != 0:
-            print("   fascia notturna → spengo (scavalcabile a mano)")
-            if not DRY_RUN: fg_set(H, p["operation_mode"]["key"], 0)
-            actions.append(f"{room['name']}: notte → spento")
+    # 3) NOTTE CAMERETTA → solo ventilazione (muove aria, non raffredda)
+    if room.get("night_fan") and in_window(now_it().hour + now_it().minute / 60, NIGHT_FROM, NIGHT_TO):
+        if cur_mode != FAN_ONLY:
+            print("   🌙 notte cameretta → solo ventola")
+            if not DRY_RUN:
+                fg_set(H, p["operation_mode"]["key"], FAN_ONLY)
+                fg_set(H, p["fan_speed"]["key"], FAN_QUIET)
+            actions.append(f"{room['name']}: notte → solo ventola")
         else:
-            print("   fascia notturna, già spento")
-        autostate[dsn] = {"mode": 0, "sp": cur_sp_raw, "hold_until": 0}
+            print("   🌙 notte cameretta, già in ventola")
+        remember(FAN_ONLY, cur_sp_raw)
         return False
 
-    # CONTROLLO DOLCE verso il target
-    room_target = target
-    error = temp - room_target
+    # 4) VIA DI CASA → mantenimento: raffresca solo se troppo caldo, altrimenti spento (dormiente finché PRESENCE_ENABLED=false)
+    if away:
+        sp_raw = int(round_half(MAINTENANCE_MAX) * 10)
+        if temp > MAINTENANCE_MAX:
+            if cur_mode != COOL or cur_sp_raw != sp_raw:
+                print(f"   🛰️ via: mantenimento → cool {MAINTENANCE_MAX:g}°")
+                if not DRY_RUN:
+                    fg_set(H, p["operation_mode"]["key"], COOL)
+                    fg_set(H, p["fan_speed"]["key"], FAN_QUIET)
+                    fg_set(H, p["adjust_temperature"]["key"], sp_raw)
+                actions.append(f"{room['name']}: via → mantenimento {MAINTENANCE_MAX:g}°")
+            remember(COOL, sp_raw)
+        else:
+            if cur_mode != OFF:
+                print("   🛰️ via: in banda → spengo")
+                if not DRY_RUN: fg_set(H, p["operation_mode"]["key"], OFF)
+                actions.append(f"{room['name']}: via → spento")
+            remember(OFF, cur_sp_raw)
+        return False
 
-    # GESTIONE UMIDITÀ — solo qui (mai in emergenza/notte/fuori/blocco manuale); 'hum' può essere None in fallback.
+    # 5) COMFORT dolce verso target + umidità (dry quando l'umidità è disponibile)
+    error = temp - target
     if cur_mode == DRY and st.get("mode") == DRY:
-        # il dry l'abbiamo messo noi: torna cool se l'aria è asciutta o la stanza si è riscaldata
         if (hum is not None and hum <= RH_DRY_OFF) or error >= 1.0:
-            new_sp = min(SETPOINT_MAX, max(SETPOINT_MIN, round_half(room_target)))
+            new_sp = min(SETPOINT_MAX, max(SETPOINT_MIN, round_half(target)))
             why = "umidità ok" if (hum is not None and hum <= RH_DRY_OFF) else "temperatura risalita"
             print(f"   💧→❄️ {why} → torno cool {new_sp:.1f}°C")
             if not DRY_RUN:
@@ -374,10 +342,10 @@ def control_room(room, readings, H, autostate, actions, emerg, anyone, target, n
                 fg_set(H, p["fan_speed"]["key"], FAN_QUIET)
                 fg_set(H, p["adjust_temperature"]["key"], int(new_sp * 10))
                 actions.append(f"{room['name']}: {why} → cool {new_sp:.1f}°C")
-            autostate[dsn] = {"mode": COOL, "sp": int(new_sp * 10), "hold_until": 0}
+            remember(COOL, int(new_sp * 10))
         else:
-            print(f"   💧 dry attivo (umidità {hum:.0f}%)" if hum is not None else "   💧 dry attivo")
-            autostate[dsn] = {"mode": DRY, "sp": cur_sp_raw, "hold_until": 0}
+            print("   💧 dry attivo" + (f" (umidità {hum:.0f}%)" if hum is not None else ""))
+            remember(DRY, cur_sp_raw)
         return False
     if cur_mode == COOL and hum is not None and hum >= RH_DRY_ON and error <= 0.5:
         print(f"   ❄️→💧 vicino al target ma umidità {hum:.0f}% → dry")
@@ -385,27 +353,26 @@ def control_room(room, readings, H, autostate, actions, emerg, anyone, target, n
             fg_set(H, p["operation_mode"]["key"], DRY)
             fg_set(H, p["fan_speed"]["key"], FAN_QUIET)
             actions.append(f"{room['name']}: umidità {hum:.0f}% → dry")
-        autostate[dsn] = {"mode": DRY, "sp": cur_sp_raw, "hold_until": 0}
+        remember(DRY, cur_sp_raw)
         return False
-
     if cur_mode != COOL:
-        new_sp = min(SETPOINT_MAX, max(SETPOINT_MIN, round_half(room_target)))
+        new_sp = min(SETPOINT_MAX, max(SETPOINT_MIN, round_half(target)))
         print(f"   avvio cool {new_sp:.1f}°C")
         if not DRY_RUN:
             fg_set(H, p["operation_mode"]["key"], COOL)
             fg_set(H, p["fan_speed"]["key"], FAN_QUIET)
             fg_set(H, p["adjust_temperature"]["key"], int(new_sp * 10))
             actions.append(f"{room['name']}: acceso cool {new_sp:.1f}°C")
-        autostate[dsn] = {"mode": COOL, "sp": int(new_sp * 10), "hold_until": 0}
+        remember(COOL, int(new_sp * 10))
     elif abs(error) <= DEADZONE:
-        print(f"   stabile a {temp:.1f}°C (nessun cambio)")
-        autostate[dsn] = {"mode": COOL, "sp": cur_sp_raw, "hold_until": 0}
+        print(f"   stabile a {temp:.1f}°C")
+        remember(COOL, cur_sp_raw)
     else:
         new_sp = min(SETPOINT_MAX, max(SETPOINT_MIN, round_half(cur_sp + (-STEP if error > 0 else STEP))))
-        print(f"   {temp:.1f} vs {room_target:.1f} → setpoint {new_sp:.1f}°C")
+        print(f"   {temp:.1f} vs {target:.1f} → setpoint {new_sp:.1f}°C")
         if not DRY_RUN and int(new_sp * 10) != cur_sp_raw:
             fg_set(H, p["adjust_temperature"]["key"], int(new_sp * 10))
-        autostate[dsn] = {"mode": COOL, "sp": int(new_sp * 10), "hold_until": 0}
+        remember(COOL, int(new_sp * 10))
     return False
 
 
@@ -413,16 +380,13 @@ def main():
     actions = []
     print(f"== Ponte CLOUD @ {now_it():%H:%M} IT (DRY_RUN={DRY_RUN}) ==")
     try:
-        if PRESENCE_ENABLED:
-            anyone, kids = read_presence()
-        else:
-            anyone, kids = True, False   # presenza disattivata → sempre "casa", controllo normale
-        base = TARGET_SOFT if kids else BASE_TARGET
+        anyone = read_presence()[0] if PRESENCE_ENABLED else True
+        away = PRESENCE_ENABLED and not anyone   # 'via di casa' → mantenimento (dormiente finché presenza OFF)
         out = outdoor_temp()
-        target = base if out is None else max(base, out - MAX_DELTA)
-        stato = ("presenza disattivata (sempre casa)" if not PRESENCE_ENABLED else
-                 ("tutti fuori" if not anyone else ("Jessica/bimbi a casa (soft)" if kids else "solo adulto a casa")))
-        print(f"Presenza: {stato} | esterno: {out}°C | target: {target:.1f}°C")
+        target = COMFORT_TARGET if out is None else max(COMFORT_TARGET, out - MAX_DELTA)
+        stato = ("presenza OFF (comfort sempre)" if not PRESENCE_ENABLED
+                 else ("VIA → mantenimento" if away else "a casa → comfort"))
+        print(f"Presenza: {stato} | esterno: {out}°C | target comfort: {target:.1f}°C")
 
         em = load_emergency()
         emerg = emergency_mode(em)
@@ -453,7 +417,6 @@ def main():
 
         H = with_retry(fg_login, what="login FGLair")
         autostate = load_autostate()
-        now_ts = now_it().timestamp()
 
         # Notifica quando un'emergenza è APPENA scaduta (transizione attiva → spenta)
         if autostate.get("_emergency") in ("off", "safe") and emerg is None:
@@ -474,7 +437,7 @@ def main():
         room_errors = []
         for room in ROOMS:
             try:
-                if control_room(room, readings, H, autostate, actions, emerg, anyone, target, now_ts):
+                if control_room(room, readings, H, autostate, actions, emerg, away, target):
                     emergency_reverted = True
             except Exception as e:
                 print(f"   ⚠️ [{room['name']}] errore stanza: {e}")

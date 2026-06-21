@@ -30,15 +30,14 @@ jobs:
           DRY_RUN: ${{ vars.DRY_RUN || 'true' }}          # default sicuro; metti la variabile DRY_RUN=false per agire
           PRESENCE_URL: ${{ vars.PRESENCE_URL }}            # flag presenza (raw di presence.json)
           PRESENCE_ENABLED: ${{ vars.PRESENCE_ENABLED || 'false' }}  # presenza disattivata finché non c'è l'automazione WiFi (riattiva: Variable=true)
-          TARGET: ${{ vars.TARGET || '25' }}                # target normale (solo adulto a casa)
-          TARGET_SOFT: ${{ vars.TARGET_SOFT || '25' }}      # target soft quando ci sono i bimbi (Jessica a casa)
-          MAX_DELTA: ${{ vars.MAX_DELTA || '6' }}           # Δ max interno-esterno (anti shock termico)
-          HOLD_HOURS: ${{ vars.HOLD_HOURS || '1' }}         # blocco manuale: pausa automatismo dopo un cambio a mano
-          RH_DRY_ON: ${{ vars.RH_DRY_ON || '62' }}           # umidità % oltre cui passare in dry (temp vicina al target)
-          RH_DRY_OFF: ${{ vars.RH_DRY_OFF || '55' }}         # umidità % sotto cui tornare in cool
-          WAKE_HOUR: ${{ vars.WAKE_HOUR || '9.5' }}          # cameretta: riaccensione mattutina feriali (09:30)
-          WAKE_HOUR_HOME: ${{ vars.WAKE_HOUR_HOME || '12' }} # cameretta: riaccensione weekend/festivi (12:00)
-          SAFE_TARGET: ${{ vars.SAFE_TARGET || '26' }}        # emergenza 'modalità sicura': setpoint cool gentile
+          TARGET: ${{ vars.TARGET || '25' }}                  # comfort dolce (sempre)
+          MAX_DELTA: ${{ vars.MAX_DELTA || '6' }}             # Δ max interno-esterno (anti shock termico)
+          MAINTENANCE_MAX: ${{ vars.MAINTENANCE_MAX || '28' }} # via di casa: raffresca solo sopra questa
+          RH_DRY_ON: ${{ vars.RH_DRY_ON || '62' }}             # umidità % oltre cui passare in dry
+          RH_DRY_OFF: ${{ vars.RH_DRY_OFF || '55' }}           # umidità % sotto cui tornare in cool
+          NIGHT_FROM: ${{ vars.NIGHT_FROM || '22' }}           # cameretta: inizio notte (solo ventola)
+          NIGHT_TO: ${{ vars.NIGHT_TO || '8' }}                # cameretta: fine notte
+          SAFE_TARGET: ${{ vars.SAFE_TARGET || '26' }}         # emergenza 'modalità sicura': setpoint cool gentile
           FGLAIR_EMAIL: ${{ secrets.FGLAIR_EMAIL }}
           FGLAIR_PASSWORD: ${{ secrets.FGLAIR_PASSWORD }}
           AQARA_EMAIL: ${{ secrets.AQARA_EMAIL }}
