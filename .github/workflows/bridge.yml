@@ -1,9 +1,12 @@
 name: clima-bridge
 
 on:
+  # Il cron di GitHub è inaffidabile E raddoppia i trigger insieme a cron-job.org: due run
+  # nello stesso concurrency group si rimpiazzano a vicenda quando i runner sono lenti.
+  # Sorgente unica = cron-job.org (workflow_dispatch ogni 15 min).
   schedule:
-    - cron: '*/15 * * * *'   # ogni ~15 minuti (GitHub a volte ritarda un po')
-  workflow_dispatch: {}        # permette l'avvio manuale dal sito
+    - cron: '7 * * * *'      # solo rete di sicurezza oraria se cron-job.org si ferma
+  workflow_dispatch: {}        # trigger principale (cron-job.org) + avvio manuale
 
 # Evita esecuzioni sovrapposte accodando. NON usare cancel-in-progress: quando i runner
 # GitHub sono lenti (coda > 15 min) ogni run verrebbe uccisa dalla successiva e non ne
