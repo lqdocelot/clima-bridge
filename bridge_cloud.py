@@ -88,6 +88,11 @@ PRESENCE_ENABLED = os.environ.get("PRESENCE_ENABLED", "true").lower() != "false"
 # Con 'false' il ponte non tenta nemmeno la lettura (niente attese/hang) e usa direttamente
 # la temperatura interna dei climi. Riattivare quando la connessione Aqara sarà ripristinata.
 AQARA_ENABLED = os.environ.get("AQARA_ENABLED", "true").lower() != "false"
+# Sorgente LOCALE dei sensori: il Mac in casa legge i 4 sensori Aqara via Matter (hub M2,
+# pairing del 29/05 ancora valido) e pubblica qui — nessun cloud Aqara, nessuna approvazione.
+# Usato solo se il file è più fresco di MATTER_MAX_AGE (altrimenti il Mac è spento/fuori casa).
+MATTER_FILE = "sensors_matter.json"
+MATTER_MAX_AGE = float(os.environ.get("MATTER_MAX_AGE", "2700"))  # 45 min
 
 
 def notify(text):
@@ -169,6 +174,25 @@ def outdoor_temp():
         return float(r.json()["current"]["temperature_2m"])
     except Exception:
         return None
+
+
+def matter_readings():
+    """Letture pubblicate dal Mac via Matter (LAN). {} se il file manca, è illeggibile o è
+    troppo vecchio — in quel caso si passa alle sorgenti successive senza far danni."""
+    try:
+        d = json.load(open(MATTER_FILE))
+        age = now_it().timestamp() - float(d.get("updated", 0))
+        if age > MATTER_MAX_AGE:
+            print(f"   (sensori Matter stantii: {age/60:.0f} min fa → ignorati)")
+            return {}
+        out = {}
+        for did, v in (d.get("rooms") or {}).items():
+            t = v.get("temp")
+            if t is not None:
+                out[did] = {"temp": float(t), "hum": (float(v["hum"]) if v.get("hum") is not None else None)}
+        return out
+    except Exception:
+        return {}
 
 
 def aqara_readings():
@@ -415,11 +439,19 @@ def main():
             until = datetime.fromtimestamp(float(em.get("until", 0)), TZ_ROME).strftime("%d/%m %H:%M")
             print(f"🆘 EMERGENZA ATTIVA: {emerg} (fino a {until}) — bypass dell'automatismo normale")
 
-        aqara_skipped = not AQARA_ENABLED
-        if aqara_skipped:
-            readings = {}; aqara_ok = False
-            print("Aqara disattivato (AQARA_ENABLED=false) → temperatura interna dei climi")
+        # Sorgenti sensori in ordine: 1) Matter locale (Mac in casa) 2) cloud Aqara 3) sensore interno clima
+        readings = matter_readings()
+        aqara_skipped = True
+        if readings:
+            aqara_ok = True
+            print("Sensori via Matter (locale):",
+                  {k[-6:]: f"{v['temp']:.1f}°C/{v['hum']:.0f}%" if v['hum'] is not None else f"{v['temp']:.1f}°C"
+                   for k, v in readings.items()})
+        elif not AQARA_ENABLED:
+            aqara_ok = False
+            print("Nessun dato Matter e Aqara disattivato → temperatura interna dei climi")
         else:
+            aqara_skipped = False   # tentiamo davvero il cloud: un fallimento va notificato
             try:
                 readings = with_retry(aqara_readings, what="lettura Aqara")
                 aqara_ok = True
