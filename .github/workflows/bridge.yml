@@ -36,7 +36,10 @@ jobs:
           DRY_RUN: ${{ vars.DRY_RUN || 'true' }}          # default sicuro; metti la variabile DRY_RUN=false per agire
           PRESENCE_URL: ${{ vars.PRESENCE_URL }}            # flag presenza (raw di presence.json)
           PRESENCE_ENABLED: ${{ vars.PRESENCE_ENABLED || 'false' }}  # presenza disattivata finché non c'è l'automazione WiFi (riattiva: Variable=true)
-          AQARA_ENABLED: ${{ vars.AQARA_ENABLED || 'false' }}         # cloud Aqara irraggiungibile dal 14/06: non tentare (evita hang). Riattiva: Variable=true
+          AQARA_ENABLED: ${{ vars.AQARA_ENABLED || 'true' }}          # sensori dal cloud Aqara (Open API v3, progetto approvato)
+          AQARA_APP_ID: ${{ secrets.AQARA_APP_ID }}
+          AQARA_KEY_ID: ${{ secrets.AQARA_KEY_ID }}
+          AQARA_APP_KEY: ${{ secrets.AQARA_APP_KEY }}
           TARGET: ${{ vars.TARGET || '25' }}                  # comfort dolce (sempre)
           MAX_DELTA: ${{ vars.MAX_DELTA || '6' }}             # Δ max interno-esterno (anti shock termico)
           MAINTENANCE_MAX: ${{ vars.MAINTENANCE_MAX || '28' }} # via di casa: raffresca solo sopra questa
@@ -56,7 +59,7 @@ jobs:
         run: |
           git config user.name clima
           git config user.email clima@local
-          git add autostate.json sensors.json
+          git add autostate.json sensors.json aqara_token.enc
           if git diff --staged --quiet; then
             echo "nessun cambio di stato"
           else

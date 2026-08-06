@@ -9,6 +9,8 @@ Cloud puro: gira da ovunque (es. GitHub Actions). Credenziali e config da variab
 
 DRY_RUN=true (default) -> non comanda nulla, stampa/avvisa soltanto.
 """
+import base64
+import hashlib
 import json
 import os
 import time
@@ -16,7 +18,6 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 import requests
-from aqara_iot import AqaraOpenAPI, AqaraDeviceManager
 
 TZ_ROME = ZoneInfo("Europe/Rome")  # ora locale italiana, esplicita (il runner GitHub è UTC)
 
@@ -88,6 +89,13 @@ PRESENCE_ENABLED = os.environ.get("PRESENCE_ENABLED", "true").lower() != "false"
 # Con 'false' il ponte non tenta nemmeno la lettura (niente attese/hang) e usa direttamente
 # la temperatura interna dei climi. Riattivare quando la connessione Aqara sarà ripristinata.
 AQARA_ENABLED = os.environ.get("AQARA_ENABLED", "true").lower() != "false"
+# Credenziali Open API v3 (progetto approvato sul developer console, regione Europa).
+AQARA_EP = "https://open-ger.aqara.com/v3.0/open/api"
+AQARA_APP_ID = os.environ.get("AQARA_APP_ID", "")
+AQARA_KEY_ID = os.environ.get("AQARA_KEY_ID", "")
+AQARA_APP_KEY = os.environ.get("AQARA_APP_KEY", "")
+AQARA_REFRESH_TOKEN = os.environ.get("AQARA_REFRESH_TOKEN", "")  # solo bootstrap iniziale
+AQARA_TOKEN_FILE = "aqara_token.enc"  # token persistito CIFRATO (il repo è pubblico)
 # Sorgente LOCALE dei sensori: il Mac in casa legge i 4 sensori Aqara via Matter (hub M2,
 # pairing del 29/05 ancora valido) e pubblica qui — nessun cloud Aqara, nessuna approvazione.
 # Usato solo se il file è più fresco di MATTER_MAX_AGE (altrimenti il Mac è spento/fuori casa).
@@ -195,25 +203,84 @@ def matter_readings():
         return {}
 
 
+def _token_key():
+    """Chiave di cifratura derivata dall'app key (che sta nei Secrets): nessun segreto in più
+    da gestire, e il file nel repo pubblico resta illeggibile."""
+    from cryptography.fernet import Fernet
+    return Fernet(base64.urlsafe_b64encode(hashlib.sha256(AQARA_APP_KEY.encode()).digest()))
+
+
+def load_aqara_token():
+    """Token salvato (cifrato) nel repo. {} se assente, illeggibile o cifrato con altra chiave."""
+    try:
+        return json.loads(_token_key().decrypt(open(AQARA_TOKEN_FILE, "rb").read()).decode())
+    except Exception:
+        return {}
+
+
+def save_aqara_token(tok):
+    """Persiste il token cifrato: ogni refresh invalida il precedente, quindi il nuovo
+    DEVE essere salvato (imparato a spese nostre il 07/08)."""
+    try:
+        open(AQARA_TOKEN_FILE, "wb").write(_token_key().encrypt(json.dumps(tok).encode()))
+    except Exception as e:
+        print("   ⚠️ salvataggio token Aqara fallito:", e)
+
+
+def _aqara_headers(token=""):
+    """Firma Aqara Open API v3: MD5 di [Accesstoken=..&]Appid=..&Keyid=..&Nonce=..&Time=..+AppKey,
+    tutto minuscolo."""
+    now = str(int(time.time() * 1000))
+    raw = ((f"Accesstoken={token}&" if token else "")
+           + f"Appid={AQARA_APP_ID}&Keyid={AQARA_KEY_ID}&Nonce={now}&Time={now}{AQARA_APP_KEY}")
+    h = {"Appid": AQARA_APP_ID, "Keyid": AQARA_KEY_ID, "Nonce": now, "Time": now,
+         "Sign": hashlib.md5(raw.lower().encode()).hexdigest(),
+         "Lang": "en", "Content-Type": "application/json"}
+    if token:
+        h["Accesstoken"] = token
+    return h
+
+
+def _aqara_call(intent, data, token=""):
+    r = requests.post(AQARA_EP, headers=_aqara_headers(token),
+                      data=json.dumps({"intent": intent, "data": data}), timeout=20).json()
+    if r.get("code") != 0:
+        raise RuntimeError(f"Aqara {intent}: {r.get('code')} {r.get('message')}")
+    return r.get("result")
+
+
 def aqara_readings():
-    api = AqaraOpenAPI("Europe")
-    api.session = timeout_session()   # l'SDK non mette timeout: senza questo il giro può appendersi
-    if not api.get_auth(os.environ["AQARA_EMAIL"], os.environ["AQARA_PASSWORD"]):
-        raise RuntimeError("Login Aqara fallito")
-    dm = AqaraDeviceManager(api)
-    dm.generate_devices_and_update_value()
+    """Legge i sensori dal cloud Aqara con l'Open API v3 firmata (progetto approvato).
+    Il refresh token è riutilizzabile, quindi non serve persistere nulla: a ogni giro
+    si ottiene un access token fresco. Niente SDK (l'app della libreria è stata revocata)."""
+    if not (AQARA_APP_ID and AQARA_KEY_ID and AQARA_APP_KEY):
+        raise RuntimeError("credenziali Aqara non configurate")
+    saved = load_aqara_token()
+    tok = saved.get("accessToken")
+    # rinnova solo quando serve (l'access token dura ~30 giorni): ogni refresh invalida il
+    # precedente, quindi il nuovo va SEMPRE persistito.
+    if not tok or time.time() > float(saved.get("expiresAt", 0)) - 86400:
+        rt = saved.get("refreshToken") or AQARA_REFRESH_TOKEN
+        if not rt:
+            raise RuntimeError("Aqara: nessun refresh token disponibile")
+        res = _aqara_call("config.auth.refreshToken", {"refreshToken": rt}) or {}
+        tok = res.get("accessToken")
+        if not tok:
+            raise RuntimeError("Aqara: refresh token rifiutato")
+        save_aqara_token({"accessToken": tok, "refreshToken": res.get("refreshToken") or rt,
+                          "expiresAt": time.time() + float(res.get("expiresIn") or 2592000)})
+        print("   (token Aqara rinnovato e salvato)")
+    res = _aqara_call("query.resource.value",
+                      {"resources": [{"subjectId": did, "resourceIds": [RES_TEMP, RES_HUM]}
+                                     for did in SENSOR_NAMES]}, token=tok) or []
+    vals = {}
+    for item in res:
+        vals.setdefault(item["subjectId"], {})[item["resourceId"]] = item.get("value")
     out = {}
-    for did, dev in (getattr(dm, "device_map", None) or {}).items():
-        pmap = getattr(dev, "point_map", {}) or {}
-        def val(res):
-            k = f"{did}__{res}"
-            try:
-                return int(getattr(pmap[k], "value", pmap[k])) if k in pmap else None
-            except Exception:
-                return None
-        t, h = val(RES_TEMP), val(RES_HUM)
+    for did, v in vals.items():
+        t, h = v.get(RES_TEMP), v.get(RES_HUM)
         if t is not None:
-            out[did] = {"temp": t / 100, "hum": (h / 100 if h is not None else None)}
+            out[did] = {"temp": int(t) / 100, "hum": (int(h) / 100 if h is not None else None)}
     return out
 
 
