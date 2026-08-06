@@ -22,11 +22,12 @@ jobs:
               a = json.load(open("autostate.json"))
           except Exception:
               a = {}
-          for v in a.values():
-              if isinstance(v, dict) and "manual" in v:
-                  v["manual"] = False
+          # RIMUOVE le entry per-stanza (non basta manual=False): se restasse memorizzato il
+          # vecchio stato, al giro dopo il ponte lo troverebbe diverso dal clima reale e si
+          # ri-bloccherebbe da solo con un falso "cambio manuale". Ripartire da zero = pulito.
+          a = {k: v for k, v in a.items() if k.startswith("_")}
           json.dump(a, open("autostate.json", "w"))
-          print("comfort: emergenza azzerata, override manuali rimossi")
+          print("comfort: emergenza azzerata, stato automatismo ripulito ->", a)
           PY
       - name: Commit
         run: |
