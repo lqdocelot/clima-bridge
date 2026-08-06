@@ -5,11 +5,13 @@ on:
     - cron: '*/15 * * * *'   # ogni ~15 minuti (GitHub a volte ritarda un po')
   workflow_dispatch: {}        # permette l'avvio manuale dal sito
 
-# evita esecuzioni sovrapposte. cancel-in-progress: una run bloccata viene SOSTITUITA dalla
-# successiva invece di far accodare (e poi cancellare) tutte le altre — il giro è idempotente.
+# Evita esecuzioni sovrapposte accodando. NON usare cancel-in-progress: quando i runner
+# GitHub sono lenti (coda > 15 min) ogni run verrebbe uccisa dalla successiva e non ne
+# completerebbe MAI una (visto 06/08). Gli hang sono già risolti alla fonte (timeout Aqara
+# + timeout-minutes), quindi accodare è sicuro.
 concurrency:
   group: clima-bridge
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 permissions:
   contents: write   # per salvare autostate.json (memoria blocco manuale)
