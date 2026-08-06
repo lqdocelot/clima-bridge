@@ -5,10 +5,11 @@ on:
     - cron: '*/15 * * * *'   # ogni ~15 minuti (GitHub a volte ritarda un po')
   workflow_dispatch: {}        # permette l'avvio manuale dal sito
 
-# evita esecuzioni sovrapposte
+# evita esecuzioni sovrapposte. cancel-in-progress: una run bloccata viene SOSTITUITA dalla
+# successiva invece di far accodare (e poi cancellare) tutte le altre — il giro è idempotente.
 concurrency:
   group: clima-bridge
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 permissions:
   contents: write   # per salvare autostate.json (memoria blocco manuale)
@@ -16,7 +17,7 @@ permissions:
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 4   # il giro normale dura ~25s: oltre questo è appeso, meglio ucciderlo
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -30,6 +31,7 @@ jobs:
           DRY_RUN: ${{ vars.DRY_RUN || 'true' }}          # default sicuro; metti la variabile DRY_RUN=false per agire
           PRESENCE_URL: ${{ vars.PRESENCE_URL }}            # flag presenza (raw di presence.json)
           PRESENCE_ENABLED: ${{ vars.PRESENCE_ENABLED || 'false' }}  # presenza disattivata finché non c'è l'automazione WiFi (riattiva: Variable=true)
+          AQARA_ENABLED: ${{ vars.AQARA_ENABLED || 'false' }}         # cloud Aqara irraggiungibile dal 14/06: non tentare (evita hang). Riattiva: Variable=true
           TARGET: ${{ vars.TARGET || '25' }}                  # comfort dolce (sempre)
           MAX_DELTA: ${{ vars.MAX_DELTA || '6' }}             # Δ max interno-esterno (anti shock termico)
           MAINTENANCE_MAX: ${{ vars.MAINTENANCE_MAX || '28' }} # via di casa: raffresca solo sopra questa

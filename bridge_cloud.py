@@ -84,6 +84,10 @@ PRESENCE_URL = os.environ.get("PRESENCE_URL", "")
 # (nessuno spegnimento per 'tutti fuori'). Disattivata finché non c'è un aggiornatore
 # automatico affidabile (automazione WiFi sui telefoni). Riattivare con repo Variable.
 PRESENCE_ENABLED = os.environ.get("PRESENCE_ENABLED", "true").lower() != "false"
+# Interruttore sensori Aqara: il cloud Aqara è inaccessibile dal 14/06 (app dell'SDK revocata).
+# Con 'false' il ponte non tenta nemmeno la lettura (niente attese/hang) e usa direttamente
+# la temperatura interna dei climi. Riattivare quando la connessione Aqara sarà ripristinata.
+AQARA_ENABLED = os.environ.get("AQARA_ENABLED", "true").lower() != "false"
 
 
 def notify(text):
@@ -98,6 +102,17 @@ def notify(text):
 
 def round_half(x):
     return round(x * 2) / 2
+
+
+def timeout_session(timeout=20):
+    """Session con timeout FORZATO: l'SDK Aqara fa le sue POST senza timeout, quindi se il
+    cloud non risponde la chiamata resta appesa all'infinito e blocca l'intero giro
+    (visto 06/08: run da 900-1400s, job in coda cancellati a raffica)."""
+    class _S(requests.Session):
+        def request(self, *a, **kw):
+            kw.setdefault("timeout", timeout)
+            return super().request(*a, **kw)
+    return _S()
 
 
 _RETRY_SLEEP = 8  # secondi tra i tentativi di rete (azzerato nei test)
@@ -158,6 +173,7 @@ def outdoor_temp():
 
 def aqara_readings():
     api = AqaraOpenAPI("Europe")
+    api.session = timeout_session()   # l'SDK non mette timeout: senza questo il giro può appendersi
     if not api.get_auth(os.environ["AQARA_EMAIL"], os.environ["AQARA_PASSWORD"]):
         raise RuntimeError("Login Aqara fallito")
     dm = AqaraDeviceManager(api)
@@ -399,13 +415,18 @@ def main():
             until = datetime.fromtimestamp(float(em.get("until", 0)), TZ_ROME).strftime("%d/%m %H:%M")
             print(f"🆘 EMERGENZA ATTIVA: {emerg} (fino a {until}) — bypass dell'automatismo normale")
 
-        try:
-            readings = with_retry(aqara_readings, what="lettura Aqara")
-            aqara_ok = True
-            print("Aqara:", {k[-6:]: f"{v['temp']:.1f}°C/{v['hum']:.0f}%" if v['hum'] else f"{v['temp']:.1f}°C" for k, v in readings.items()})
-        except Exception as e:
+        aqara_skipped = not AQARA_ENABLED
+        if aqara_skipped:
             readings = {}; aqara_ok = False
-            print(f"⚠️ Aqara non raggiungibile ({e}) → fallback temperatura interna clima")
+            print("Aqara disattivato (AQARA_ENABLED=false) → temperatura interna dei climi")
+        else:
+            try:
+                readings = with_retry(aqara_readings, what="lettura Aqara")
+                aqara_ok = True
+                print("Aqara:", {k[-6:]: f"{v['temp']:.1f}°C/{v['hum']:.0f}%" if v['hum'] else f"{v['temp']:.1f}°C" for k, v in readings.items()})
+            except Exception as e:
+                readings = {}; aqara_ok = False
+                print(f"⚠️ Aqara non raggiungibile ({e}) → fallback temperatura interna clima")
 
         # pubblica temperature/umidità per il bot Telegram (sensors.json nel repo)
         try:
@@ -428,8 +449,11 @@ def main():
             notify("✅ Emergenza terminata: l'automatismo del clima è ripreso normalmente.")
         autostate["_emergency"] = emerg or "none"
 
-        # Notifica una sola volta l'ingresso/uscita dalla modalità degradata (Aqara giù → sensore interno clima)
-        if not aqara_ok and not autostate.get("_aqara_down"):
+        # Notifica una sola volta l'ingresso/uscita dalla modalità degradata (Aqara giù → sensore interno clima).
+        # Se Aqara è disattivato di proposito non c'è nulla da notificare.
+        if aqara_skipped:
+            pass
+        elif not aqara_ok and not autostate.get("_aqara_down"):
             notify("⚠️ Sensori Aqara non raggiungibili: uso la temperatura interna dei condizionatori "
                    "(niente umidità/dry, niente monitoraggio Camera/Bagno) finché non tornano.")
         elif aqara_ok and autostate.get("_aqara_down"):
