@@ -39,12 +39,15 @@ STEP = 0.5
 SETPOINT_MIN, SETPOINT_MAX = 20.0, 29.0
 MAX_DELTA = float(os.environ.get("MAX_DELTA", "6.0"))      # cap Δ interno-esterno (anti shock termico)
 MAINTENANCE_MAX = float(os.environ.get("MAINTENANCE_MAX", "28.0"))  # via di casa: raffresca solo sopra questa
-# Umidità: vicino al target con aria umida si passa in dry; isteresi per non fare ping-pong.
-RH_DRY_ON = float(os.environ.get("RH_DRY_ON", "62"))    # % oltre cui passare in dry (se temp vicina al target)
-RH_DRY_OFF = float(os.environ.get("RH_DRY_OFF", "55"))  # % sotto cui tornare in cool
-# Cameretta: di notte solo ventilazione (muove aria, non raffredda). Scavalcabile a mano.
-NIGHT_FROM = float(os.environ.get("NIGHT_FROM", "22"))
-NIGHT_TO = float(os.environ.get("NIGHT_TO", "8"))
+# Umidità. Di GIORNO (DAY_FROM→DAY_TO) la soglia è più severa e ha la precedenza: appena si
+# superano RH_DAY_MAX si passa in dry anche se la stanza è ancora tiepida. Di notte vale la
+# soglia alta e conservativa (RH_DRY_ON, solo a temperatura già a posto). Isteresi: RH_DRY_OFF.
+RH_DAY_MAX = float(os.environ.get("RH_DAY_MAX", "55"))  # % max di giorno → dry subito
+RH_DRY_ON = float(os.environ.get("RH_DRY_ON", "62"))    # % di notte (con temp vicina al target)
+RH_DRY_OFF = float(os.environ.get("RH_DRY_OFF", "50"))  # % sotto cui si esce dal dry
+DAY_FROM = float(os.environ.get("DAY_FROM", "8"))
+DAY_TO = float(os.environ.get("DAY_TO", "22"))
+HOT_GUARD = 2.0   # in dry, se la stanza supera target+HOT_GUARD si torna a raffrescare
 AUTOSTATE_FILE = "autostate.json"  # memoria di cosa ha impostato l'automatismo + flag override manuale (nel repo)
 EMERGENCY_FILE = "emergency.json"  # lockout 24h: {"mode":"off"/"safe"/"none","until":<epoch>}
 SAFE_TARGET = float(os.environ.get("SAFE_TARGET", "26"))  # setpoint cool gentile in "modalità sicura"
@@ -71,11 +74,13 @@ SENSOR_NAMES = {
     "lumi.158d008afda91f": "🛏️ Camera",
     "lumi.158d0008ab1164": "🚿 Bagno",
 }
-# night_fan=True → di notte (NIGHT_FROM→NIGHT_TO) la stanza va in sola ventilazione (cameretta Eva).
-# Il soggiorno non ce l'ha → comfort h24.
+# CAMERETTA di Eva: l'automatismo non la raffresca MAI (né cool né ventola) — si accende solo
+# se la forzi a mano. Unica eccezione: nella fascia dry_window controlla l'UMIDITÀ (dry, che non
+# raffredda) tenendola sotto RH_DAY_MAX. Il soggiorno invece ha il comfort normale h24.
 ROOMS = [
     {"name": "SOGGIORNO", "dsn": "AC000W002919142", "sensor": "lumi.158d008afda8d2"},
-    {"name": "CAMERA",    "dsn": "AC000W002919128", "sensor": "lumi.158d0008974abd", "night_fan": True},
+    {"name": "CAMERA",    "dsn": "AC000W002919128", "sensor": "lumi.158d0008974abd",
+     "always_off": True, "dry_window": (11, 21)},
 ]
 
 TG_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
@@ -376,6 +381,13 @@ def control_room(room, readings, H, autostate, actions, emerg, away, target):
         remember(OFF, cur_sp_raw)
         return reverted
     if emerg == "safe":
+        if room.get("always_off"):   # la cameretta non si accende nemmeno in modalità sicura
+            reverted = cur_mode != OFF
+            if reverted:
+                print("   🆘 sicura: cameretta resta spenta")
+                if not DRY_RUN: fg_set(H, p["operation_mode"]["key"], OFF)
+            remember(OFF, cur_sp_raw)
+            return reverted
         sp_raw = int(SAFE_TARGET * 10); changed = []
         if cur_mode != COOL:
             if not DRY_RUN: fg_set(H, p["operation_mode"]["key"], COOL)
@@ -409,17 +421,31 @@ def control_room(room, readings, H, autostate, actions, emerg, away, target):
         actions.append(f"{room['name']}: override manuale (resta fino a ▶️ Comfort)")
         return False
 
-    # 3) NOTTE CAMERETTA → solo ventilazione (muove aria, non raffredda)
-    if room.get("night_fan") and in_window(now_it().hour + now_it().minute / 60, NIGHT_FROM, NIGHT_TO):
-        if cur_mode != FAN_ONLY:
-            print("   🌙 notte cameretta → solo ventola")
-            if not DRY_RUN:
-                fg_set(H, p["operation_mode"]["key"], FAN_ONLY)
-                fg_set(H, p["fan_speed"]["key"], FAN_QUIET)
-            actions.append(f"{room['name']}: notte → solo ventola")
-        else:
-            print("   🌙 notte cameretta, già in ventola")
-        remember(FAN_ONLY, cur_sp_raw)
+    # 3) CAMERETTA: mai raffrescata dall'automatismo. Nella fascia dry_window controlla solo
+    #    l'umidità (dry, che non raffredda); fuori fascia e ad aria asciutta resta spenta.
+    if room.get("always_off"):
+        win = room.get("dry_window")
+        h = now_it().hour + now_it().minute / 60
+        if win and hum is not None and in_window(h, win[0], win[1]) and hum >= RH_DAY_MAX:
+            if cur_mode != DRY:
+                print(f"   💧 cameretta: umidità {hum:.0f}% → dry (non raffredda)")
+                if not DRY_RUN:
+                    fg_set(H, p["operation_mode"]["key"], DRY)
+                    fg_set(H, p["fan_speed"]["key"], FAN_QUIET)
+                actions.append(f"{room['name']}: umidità {hum:.0f}% → dry")
+            remember(DRY, cur_sp_raw)
+            return False
+        # in dry con umidità ancora nella zona d'isteresi (tra RH_DRY_OFF e RH_DAY_MAX): lascia finire
+        if (cur_mode == DRY and st.get("mode") == DRY and win and hum is not None
+                and in_window(h, win[0], win[1]) and hum > RH_DRY_OFF):
+            print(f"   💧 cameretta: dry in corso (umidità {hum:.0f}%)")
+            remember(DRY, cur_sp_raw)
+            return False
+        if cur_mode != OFF:
+            print("   🛏️ cameretta → spenta (l'automatismo non la accende mai)")
+            if not DRY_RUN: fg_set(H, p["operation_mode"]["key"], OFF)
+            actions.append(f"{room['name']}: spenta")
+        remember(OFF, cur_sp_raw)
         return False
 
     # 4) VIA DI CASA → mantenimento: raffresca solo se troppo caldo, altrimenti spento (dormiente finché PRESENCE_ENABLED=false)
@@ -444,8 +470,10 @@ def control_room(room, readings, H, autostate, actions, emerg, away, target):
 
     # 5) COMFORT dolce verso target + umidità (dry quando l'umidità è disponibile)
     error = temp - target
+    is_day = in_window(now_it().hour + now_it().minute / 60, DAY_FROM, DAY_TO)
     if cur_mode == DRY and st.get("mode") == DRY:
-        if (hum is not None and hum <= RH_DRY_OFF) or error >= 1.0:
+        # esce dal dry se l'aria è asciutta, o se la stanza si scalda troppo (guardia)
+        if (hum is not None and hum <= RH_DRY_OFF) or error >= (HOT_GUARD if is_day else 1.0):
             new_sp = min(SETPOINT_MAX, max(SETPOINT_MIN, round_half(target)))
             why = "umidità ok" if (hum is not None and hum <= RH_DRY_OFF) else "temperatura risalita"
             print(f"   💧→❄️ {why} → torno cool {new_sp:.1f}°C")
@@ -459,8 +487,12 @@ def control_room(room, readings, H, autostate, actions, emerg, away, target):
             print("   💧 dry attivo" + (f" (umidità {hum:.0f}%)" if hum is not None else ""))
             remember(DRY, cur_sp_raw)
         return False
-    if cur_mode == COOL and hum is not None and hum >= RH_DRY_ON and error <= 0.5:
-        print(f"   ❄️→💧 vicino al target ma umidità {hum:.0f}% → dry")
+    # di giorno l'umidità ha la precedenza (dry appena sopra RH_DAY_MAX, anche se tiepido);
+    # di notte serve sia aria molto umida sia temperatura già a posto.
+    if cur_mode == COOL and hum is not None and (
+            (is_day and hum >= RH_DAY_MAX and error < HOT_GUARD)
+            or (not is_day and hum >= RH_DRY_ON and error <= 0.5)):
+        print(f"   ❄️→💧 umidità {hum:.0f}% → dry")
         if not DRY_RUN:
             fg_set(H, p["operation_mode"]["key"], DRY)
             fg_set(H, p["fan_speed"]["key"], FAN_QUIET)
