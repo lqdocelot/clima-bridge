@@ -208,6 +208,11 @@ def matter_readings():
         return {}
 
 
+class AqaraNotConfigured(RuntimeError):
+    """Credenziali Aqara assenti: è una configurazione mancante (o una scelta), NON un guasto —
+    quindi niente notifica d'allarme, si passa semplicemente alla sorgente successiva."""
+
+
 def _token_key():
     """Chiave di cifratura derivata dall'app key (che sta nei Secrets): nessun segreto in più
     da gestire, e il file nel repo pubblico resta illeggibile."""
@@ -259,7 +264,7 @@ def aqara_readings():
     Il refresh token è riutilizzabile, quindi non serve persistere nulla: a ogni giro
     si ottiene un access token fresco. Niente SDK (l'app della libreria è stata revocata)."""
     if not (AQARA_APP_ID and AQARA_KEY_ID and AQARA_APP_KEY):
-        raise RuntimeError("credenziali Aqara non configurate")
+        raise AqaraNotConfigured("credenziali Aqara non configurate")
     saved = load_aqara_token()
     tok = saved.get("accessToken")
     # rinnova solo quando serve (l'access token dura ~30 giorni): ogni refresh invalida il
@@ -555,6 +560,9 @@ def main():
                 readings = with_retry(aqara_readings, what="lettura Aqara")
                 aqara_ok = True
                 print("Aqara:", {k[-6:]: f"{v['temp']:.1f}°C/{v['hum']:.0f}%" if v['hum'] else f"{v['temp']:.1f}°C" for k, v in readings.items()})
+            except AqaraNotConfigured:
+                readings = {}; aqara_ok = False; aqara_skipped = True   # nessun allarme
+                print("Aqara non configurato (mancano i secrets) → temperatura interna dei climi")
             except Exception as e:
                 readings = {}; aqara_ok = False
                 print(f"⚠️ Aqara non raggiungibile ({e}) → fallback temperatura interna clima")
