@@ -2,8 +2,14 @@ name: comfort
 
 # ▶️ Comfort = "riprendi automatico": azzera l'emergenza e TUTTI gli override manuali,
 # così l'automatismo torna a gestire tutto. Invocabile col Token-B (Actions:write).
+# Con l'input dsn riprende l'automatico per UNA sola stanza (emergenza e altre stanze restano).
 on:
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      dsn:
+        description: "DSN del clima (vuoto = tutte le stanze)"
+        required: false
+        default: ""
 
 permissions:
   contents: write
@@ -14,10 +20,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Riprendi automatico (azzera emergenza + override)
+        env:
+          DSN: ${{ inputs.dsn }}
         run: |
           python3 - <<'PY'
-          import json
-          json.dump({"mode": "none", "until": 0}, open("emergency.json", "w"))
+          import json, os
+          dsn = os.environ.get("DSN", "").strip()
+          if not dsn:
+              json.dump({"mode": "none", "until": 0}, open("emergency.json", "w"))
           try:
               a = json.load(open("autostate.json"))
           except Exception:
@@ -25,9 +35,9 @@ jobs:
           # RIMUOVE le entry per-stanza (non basta manual=False): se restasse memorizzato il
           # vecchio stato, al giro dopo il ponte lo troverebbe diverso dal clima reale e si
           # ri-bloccherebbe da solo con un falso "cambio manuale". Ripartire da zero = pulito.
-          a = {k: v for k, v in a.items() if k.startswith("_")}
+          a = {k: v for k, v in a.items() if k.startswith("_") or (dsn and k != dsn)}
           json.dump(a, open("autostate.json", "w"))
-          print("comfort: emergenza azzerata, stato automatismo ripulito ->", a)
+          print("comfort:", f"stanza {dsn}" if dsn else "tutte le stanze, emergenza azzerata", "->", a)
           PY
       - name: Commit
         run: |

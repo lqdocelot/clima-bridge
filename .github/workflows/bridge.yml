@@ -42,7 +42,7 @@ jobs:
           AQARA_APP_KEY: ${{ secrets.AQARA_APP_KEY }}
           TARGET: ${{ vars.TARGET || '25' }}                  # comfort dolce estivo (raffresca)
           SEASON: ${{ vars.SEASON || 'auto' }}                # auto (da media esterna del giorno) | inverno | estate
-          TARGET_WINTER: ${{ vars.TARGET_WINTER || '21' }}    # comfort invernale (scalda)
+          TARGET_WINTER: ${{ vars.TARGET_WINTER || '24' }}    # comfort invernale: caldo fisso sul clima
           HEAT_BELOW: ${{ vars.HEAT_BELOW || '14' }}          # media esterna del giorno ≤ → inverno
           COOL_ABOVE: ${{ vars.COOL_ABOVE || '18' }}          # media esterna del giorno ≥ → estate (in mezzo resta com'era)
           MAX_DELTA: ${{ vars.MAX_DELTA || '6' }}             # Δ max interno-esterno (anti shock termico)

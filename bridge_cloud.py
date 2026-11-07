@@ -42,7 +42,7 @@ SETPOINT_MIN, SETPOINT_MAX = 20.0, 29.0
 # In auto: media ≤ HEAT_BELOW → inverno, ≥ COOL_ABOVE → estate, in mezzo resta la stagione del
 # giro prima (autostate['_season']). Senza meteo né memoria: calendario 15/10–15/04 = inverno.
 SEASON = os.environ.get("SEASON", "auto").lower()
-TARGET_WINTER = float(os.environ.get("TARGET_WINTER", "21"))
+TARGET_WINTER = float(os.environ.get("TARGET_WINTER", "24"))   # d'inverno: caldo FISSO a questo valore sul clima
 HEAT_BELOW = float(os.environ.get("HEAT_BELOW", "14"))
 COOL_ABOVE = float(os.environ.get("COOL_ABOVE", "18"))
 HEAT_SP_MIN, HEAT_SP_MAX = 17.0, 25.0
@@ -473,9 +473,10 @@ def control_room(room, readings, H, autostate, actions, emerg, away, target, hea
         actions.append(f"{room['name']}: override manuale (resta fino a ▶️ Comfort)")
         return False
 
-    # 3) CAMERETTA: mai raffrescata dall'automatismo. Nella fascia dry_window controlla solo
+    # 3) CAMERETTA: d'estate mai raffrescata dall'automatismo. Nella fascia dry_window controlla solo
     #    l'umidità (dry, che non raffredda); fuori fascia e ad aria asciutta resta spenta.
-    if room.get("always_off"):
+    #    D'inverno invece si scalda come le altre stanze: per tenerla spenta si usa ⛔ Spegni (sticky).
+    if room.get("always_off") and not heat:
         win = room.get("dry_window")
         h = now_it().hour + now_it().minute / 60
         if win and hum is not None and in_window(h, win[0], win[1]) and hum >= RH_DAY_MAX:
@@ -523,27 +524,28 @@ def control_room(room, readings, H, autostate, actions, emerg, away, target, hea
     # 5) COMFORT dolce verso target + umidità (dry quando l'umidità è disponibile)
     error = temp - target
     if heat:
-        # INVERNO: stessi passi/zona morta, ma in heat e senza dry (raffredderebbe, e l'aria
-        # d'inverno è già secca). Un dry rimasto dall'estate viene sostituito dal caldo.
-        # Il passo ha lo stesso verso del cool: stanza troppo calda → setpoint giù, fredda → su.
+        # INVERNO (7/11, richiesta di Alessandro): caldo FISSO a TARGET_WINTER sul clima, che regola
+        # col suo sensore; il ponte non insegue la stanza. Ventola minima e alette tutte in alto si
+        # mettono solo all'accensione: un ritocco a mano di ventola/alette resta (non è override).
+        sp_raw = int(min(HEAT_SP_MAX, max(HEAT_SP_MIN, round_half(target))) * 10)
         if cur_mode != HEAT:
-            new_sp = min(HEAT_SP_MAX, max(HEAT_SP_MIN, round_half(target)))
-            print(f"   avvio caldo {new_sp:.1f}°C")
+            print(f"   avvio caldo {sp_raw / 10:.1f}°C")
             if not DRY_RUN:
                 fg_set(H, p["operation_mode"]["key"], HEAT)
                 fg_set(H, p["fan_speed"]["key"], FAN_QUIET)
-                fg_set(H, p["adjust_temperature"]["key"], int(new_sp * 10))
-            actions.append(f"{room['name']}: acceso caldo {new_sp:.1f}°C")
-            remember(HEAT, int(new_sp * 10))
-        elif abs(error) <= DEADZONE:
-            print(f"   stabile a {temp:.1f}°C")
-            remember(HEAT, cur_sp_raw)
+                fg_set(H, p["adjust_temperature"]["key"], sp_raw)
+                if "af_vertical_swing" in p:
+                    fg_set(H, p["af_vertical_swing"]["key"], 0)
+                if "af_vertical_direction" in p:
+                    fg_set(H, p["af_vertical_direction"]["key"], 1)   # 1 = alette tutte in alto
+            actions.append(f"{room['name']}: acceso caldo {sp_raw / 10:.1f}°C")
+        elif cur_sp_raw != sp_raw:
+            print(f"   caldo: setpoint {cur_sp_raw / 10:.1f} → {sp_raw / 10:.1f}°C")
+            if not DRY_RUN:
+                fg_set(H, p["adjust_temperature"]["key"], sp_raw)
         else:
-            new_sp = min(HEAT_SP_MAX, max(HEAT_SP_MIN, round_half(cur_sp + (-STEP if error > 0 else STEP))))
-            print(f"   {temp:.1f} vs {target:.1f} → setpoint {new_sp:.1f}°C")
-            if not DRY_RUN and int(new_sp * 10) != cur_sp_raw:
-                fg_set(H, p["adjust_temperature"]["key"], int(new_sp * 10))
-            remember(HEAT, int(new_sp * 10))
+            print(f"   caldo a {sp_raw / 10:.1f}°C (stanza {temp:.1f}°C)")
+        remember(HEAT, sp_raw)
         return False
     is_day = in_window(now_it().hour + now_it().minute / 60, DAY_FROM, DAY_TO)
     if cur_mode == DRY and st.get("mode") == DRY:
