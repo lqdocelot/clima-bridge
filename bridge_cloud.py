@@ -37,6 +37,15 @@ COMFORT_TARGET = float(os.environ.get("TARGET", "25.0"))   # comfort dolce, semp
 DEADZONE = 0.3
 STEP = 0.5
 SETPOINT_MIN, SETPOINT_MAX = 20.0, 29.0
+# ---- Stagione: d'inverno il Comfort SCALDA (heat) verso TARGET_WINTER invece di raffrescare ----
+# SEASON: 'auto' (da media esterna del giorno, con isteresi) | 'inverno' | 'estate' (forzata).
+# In auto: media ≤ HEAT_BELOW → inverno, ≥ COOL_ABOVE → estate, in mezzo resta la stagione del
+# giro prima (autostate['_season']). Senza meteo né memoria: calendario 15/10–15/04 = inverno.
+SEASON = os.environ.get("SEASON", "auto").lower()
+TARGET_WINTER = float(os.environ.get("TARGET_WINTER", "21"))
+HEAT_BELOW = float(os.environ.get("HEAT_BELOW", "14"))
+COOL_ABOVE = float(os.environ.get("COOL_ABOVE", "18"))
+HEAT_SP_MIN, HEAT_SP_MAX = 17.0, 25.0
 MAX_DELTA = float(os.environ.get("MAX_DELTA", "6.0"))      # cap Δ interno-esterno (anti shock termico)
 MAINTENANCE_MAX = float(os.environ.get("MAINTENANCE_MAX", "28.0"))  # via di casa: raffresca solo sopra questa
 # Umidità. Di GIORNO (DAY_FROM→DAY_TO) la soglia è più severa e ha la precedenza: appena si
@@ -64,9 +73,11 @@ OFF = 0
 COOL = 3
 DRY = 4
 FAN_ONLY = 5
+HEAT = 6
 FAN_QUIET = 0
 
 RES_TEMP, RES_HUM = "0.1.85", "0.2.85"
+AQARA_MAX_AGE = 2 * 3600   # s: lettura di un sensore più vecchia = sensore fermo (pila scarica, fuori portata)
 # nomi leggibili dei sensori Aqara (per il bot Telegram)
 SENSOR_NAMES = {
     "lumi.158d008afda8d2": "🛋️ Soggiorno",
@@ -189,6 +200,34 @@ def outdoor_temp():
         return None
 
 
+def outdoor_mean_today():
+    """Temperatura esterna MEDIA di oggi (ora IT): decide la stagione senza farla oscillare tra
+    giorno e notte (a novembre fuori ci sono 10-12° di escursione). None se il meteo non risponde."""
+    try:
+        r = requests.get("https://api.open-meteo.com/v1/forecast",
+                         params={"latitude": LAT, "longitude": LON, "daily": "temperature_2m_mean",
+                                 "timezone": "Europe/Rome", "forecast_days": 1}, timeout=10)
+        return float(r.json()["daily"]["temperature_2m_mean"][0])
+    except Exception:
+        return None
+
+
+def pick_season(prev, mean, today):
+    """'inverno' / 'estate'. SEASON forzata vince; poi soglie sulla media del giorno; nella banda
+    d'isteresi (o senza meteo) resta la stagione precedente; senza memoria vale il calendario
+    del riscaldamento (zona E: 15/10–15/04)."""
+    if SEASON in ("inverno", "estate"):
+        return SEASON
+    if mean is not None and mean <= HEAT_BELOW:
+        return "inverno"
+    if mean is not None and mean >= COOL_ABOVE:
+        return "estate"
+    if prev in ("inverno", "estate"):
+        return prev
+    md = (today.month, today.day)
+    return "inverno" if md >= (10, 15) or md <= (4, 15) else "estate"
+
+
 def matter_readings():
     """Letture pubblicate dal Mac via Matter (LAN). {} se il file manca, è illeggibile o è
     troppo vecchio — in quel caso si passa alle sorgenti successive senza far danni."""
@@ -283,11 +322,18 @@ def aqara_readings():
     res = _aqara_call("query.resource.value",
                       {"resources": [{"subjectId": did, "resourceIds": [RES_TEMP, RES_HUM]}
                                      for did in SENSOR_NAMES]}, token=tok) or []
-    vals = {}
+    vals, vecchi = {}, set()
     for item in res:
         vals.setdefault(item["subjectId"], {})[item["resourceId"]] = item.get("value")
+        ts = item.get("timeStamp")
+        if ts and time.time() - float(ts) / 1000 > AQARA_MAX_AGE:
+            vecchi.add(item["subjectId"])
     out = {}
     for did, v in vals.items():
+        if did in vecchi:
+            # Aqara ridà l'ultimo valore anche di un sensore scarico da mesi: non va usato
+            print(f"   (sensore {did[-6:]}: ultima lettura Aqara troppo vecchia → ignorato)")
+            continue
         t, h = v.get(RES_TEMP), v.get(RES_HUM)
         if t is not None:
             out[did] = {"temp": int(t) / 100, "hum": (int(h) / 100 if h is not None else None)}
@@ -351,9 +397,10 @@ def save_autostate(d):
     json.dump(d, open(AUTOSTATE_FILE, "w"))
 
 
-def control_room(room, readings, H, autostate, actions, emerg, away, target):
+def control_room(room, readings, H, autostate, actions, emerg, away, target, heat=False):
     """Gestisce UNA stanza, isolata. Gerarchia: EMERGENZA > OVERRIDE MANUALE (sticky, fino a
     ▶️ Comfort) > NOTTE cameretta (solo ventola) > VIA di casa (mantenimento) > COMFORT dolce+dry.
+    heat=True (inverno): il COMFORT scalda verso target invece di raffrescare, senza dry.
     Ritorna True se l'EMERGENZA ha dovuto rimettere a posto una mossa manuale."""
     dsn = room["dsn"]
     p = fg_props(H, dsn)
@@ -475,6 +522,29 @@ def control_room(room, readings, H, autostate, actions, emerg, away, target):
 
     # 5) COMFORT dolce verso target + umidità (dry quando l'umidità è disponibile)
     error = temp - target
+    if heat:
+        # INVERNO: stessi passi/zona morta, ma in heat e senza dry (raffredderebbe, e l'aria
+        # d'inverno è già secca). Un dry rimasto dall'estate viene sostituito dal caldo.
+        # Il passo ha lo stesso verso del cool: stanza troppo calda → setpoint giù, fredda → su.
+        if cur_mode != HEAT:
+            new_sp = min(HEAT_SP_MAX, max(HEAT_SP_MIN, round_half(target)))
+            print(f"   avvio caldo {new_sp:.1f}°C")
+            if not DRY_RUN:
+                fg_set(H, p["operation_mode"]["key"], HEAT)
+                fg_set(H, p["fan_speed"]["key"], FAN_QUIET)
+                fg_set(H, p["adjust_temperature"]["key"], int(new_sp * 10))
+            actions.append(f"{room['name']}: acceso caldo {new_sp:.1f}°C")
+            remember(HEAT, int(new_sp * 10))
+        elif abs(error) <= DEADZONE:
+            print(f"   stabile a {temp:.1f}°C")
+            remember(HEAT, cur_sp_raw)
+        else:
+            new_sp = min(HEAT_SP_MAX, max(HEAT_SP_MIN, round_half(cur_sp + (-STEP if error > 0 else STEP))))
+            print(f"   {temp:.1f} vs {target:.1f} → setpoint {new_sp:.1f}°C")
+            if not DRY_RUN and int(new_sp * 10) != cur_sp_raw:
+                fg_set(H, p["adjust_temperature"]["key"], int(new_sp * 10))
+            remember(HEAT, int(new_sp * 10))
+        return False
     is_day = in_window(now_it().hour + now_it().minute / 60, DAY_FROM, DAY_TO)
     if cur_mode == DRY and st.get("mode") == DRY:
         # esce dal dry se l'aria è asciutta, o se la stanza si scalda troppo (guardia)
@@ -532,10 +602,19 @@ def main():
         anyone = read_presence()[0] if PRESENCE_ENABLED else True
         away = PRESENCE_ENABLED and not anyone   # 'via di casa' → mantenimento (dormiente finché presenza OFF)
         out = outdoor_temp()
-        target = COMFORT_TARGET if out is None else max(COMFORT_TARGET, out - MAX_DELTA)
+        autostate = load_autostate()
+        prev_season = autostate.get("_season")
+        mean = outdoor_mean_today() if SEASON == "auto" else None
+        season = pick_season(prev_season, mean, now_it().date())
+        heat = season == "inverno"
+        if heat:
+            target = TARGET_WINTER   # niente cap anti-shock: scaldare a 21 con 0° fuori è normale
+        else:
+            target = COMFORT_TARGET if out is None else max(COMFORT_TARGET, out - MAX_DELTA)
         stato = ("presenza OFF (comfort sempre)" if not PRESENCE_ENABLED
                  else ("VIA → mantenimento" if away else "a casa → comfort"))
-        print(f"Presenza: {stato} | esterno: {out}°C | target comfort: {target:.1f}°C")
+        print(f"Presenza: {stato} | esterno: {out}°C (media oggi {mean}) | stagione: {season} "
+              f"({SEASON}) | target comfort: {target:.1f}°C")
 
         em = load_emergency()
         emerg = emergency_mode(em)
@@ -575,13 +654,18 @@ def main():
                 if v:
                     rooms_out.append({"name": name, "t": round(v["temp"], 1),
                                       "h": (round(v["hum"]) if v["hum"] is not None else None)})
-            json.dump({"updated": now_it().strftime("%H:%M"), "rooms": rooms_out,
+            json.dump({"updated": now_it().strftime("%H:%M"), "rooms": rooms_out, "season": season,
                        "emergency": {"mode": emerg or "none", "until": em.get("until", 0)}}, open("sensors.json", "w"))
         except Exception as e:
             print("sensors.json err:", e)
 
         H = with_retry(fg_login, what="login FGLair")
-        autostate = load_autostate()
+
+        # Notifica il cambio di stagione (non al primo avvio, quando non c'è memoria da confrontare)
+        if prev_season in ("inverno", "estate") and season != prev_season:
+            notify(f"🔥 Inverno: il Comfort ora scalda a {target:g}°" if heat
+                   else f"❄️ Estate: il Comfort torna a raffrescare a {target:g}°")
+        autostate["_season"] = season
 
         # Notifica quando un'emergenza è APPENA scaduta (transizione attiva → spenta)
         if autostate.get("_emergency") in ("off", "safe") and emerg is None:
@@ -605,7 +689,7 @@ def main():
         room_errors = []
         for room in ROOMS:
             try:
-                if control_room(room, readings, H, autostate, actions, emerg, away, target):
+                if control_room(room, readings, H, autostate, actions, emerg, away, target, heat=heat):
                     emergency_reverted = True
             except Exception as e:
                 print(f"   ⚠️ [{room['name']}] errore stanza: {e}")
