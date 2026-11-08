@@ -13,38 +13,23 @@ on:
 
 permissions:
   contents: write
+  actions: write     # per lanciare subito un giro del ponte
 
+# Niente gruppo di concorrenza: in un gruppo un Comfort in attesa verrebbe annullato dal successivo
+# (per esempio Soggiorno e poi Eva). I conflitti di push col ponte li gestisce comfort_salva.sh.
 jobs:
   resume:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Riprendi automatico (azzera emergenza + override)
+      - name: Riprendi automatico e salva (riprova se il ponte ha appena salvato)
         env:
           DSN: ${{ inputs.dsn }}
         run: |
-          python3 - <<'PY'
-          import json, os
-          dsn = os.environ.get("DSN", "").strip()
-          if not dsn:
-              json.dump({"mode": "none", "until": 0}, open("emergency.json", "w"))
-          try:
-              a = json.load(open("autostate.json"))
-          except Exception:
-              a = {}
-          # RIMUOVE le entry per-stanza (non basta manual=False): se restasse memorizzato il
-          # vecchio stato, al giro dopo il ponte lo troverebbe diverso dal clima reale e si
-          # ri-bloccherebbe da solo con un falso "cambio manuale". Ripartire da zero = pulito.
-          a = {k: v for k, v in a.items() if k.startswith("_") or (dsn and k != dsn)}
-          json.dump(a, open("autostate.json", "w"))
-          print("comfort:", f"stanza {dsn}" if dsn else "tutte le stanze, emergenza azzerata", "->", a)
-          PY
-      - name: Commit
-        run: |
           git config user.name clima
           git config user.email clima@local
-          git add emergency.json autostate.json
-          git commit -m "comfort: riprendi automatico" || echo "nessun cambiamento"
-          for i in 1 2 3; do
-            git pull --rebase --autostash && git push && break || sleep 4
-          done
+          sh comfort_salva.sh "$DSN"
+      - name: Giro del ponte subito (la stanza torna al ponte in 1-2 minuti)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run bridge.yml --ref main

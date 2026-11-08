@@ -657,6 +657,7 @@ def main():
                     rooms_out.append({"name": name, "t": round(v["temp"], 1),
                                       "h": (round(v["hum"]) if v["hum"] is not None else None)})
             json.dump({"updated": now_it().strftime("%H:%M"), "rooms": rooms_out, "season": season,
+                       "target": round(target, 1),   # target del Comfort: lo mostra la pagina Clima della bacheca
                        "emergency": {"mode": emerg or "none", "until": em.get("until", 0)}}, open("sensors.json", "w"))
         except Exception as e:
             print("sensors.json err:", e)
