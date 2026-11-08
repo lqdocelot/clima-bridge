@@ -16,6 +16,8 @@ function finto(op: {
   propsRotte?: string[];
   propsLente?: string[];
   limite?: number;
+  setLento?: number;
+  setRotto?: boolean;
 } = {}) {
   const climi: Record<string, Clima> = op.climi ?? {
     [SOG]: { mode: HEAT, sp: 240 },
@@ -23,7 +25,7 @@ function finto(op: {
   };
   const scritti: [string, string, number][] = [];
   const comfort: string[] = [];
-  let chiamateFg = 0;
+  let chiamateFg = 0, inVolo = 0, massimo = 0;
   const nomi = ["operation_mode", "adjust_temperature", "fan_speed", "af_vertical_swing", "af_vertical_direction", "display_temperature"];
   const gestore = crea({
     chiave: "segreta",
@@ -45,10 +47,13 @@ function finto(op: {
       };
       return Promise.resolve(Object.fromEntries(nomi.map((n, i) => [n, { key: i + (dsn === SOG ? 100 : 200), value: v[n] }])));
     },
-    set: (_tok, key, value) => {
+    set: async (_tok, key, value) => {
       chiamateFg++;
+      if (op.setRotto) throw new Error("FGLair 500");
+      inVolo++; massimo = Math.max(massimo, inVolo);
+      if (op.setLento) await new Promise((r) => setTimeout(r, op.setLento));
+      inVolo--;
       scritti.push([key >= 200 ? "eva" : "soggiorno", nomi[key % 100], value]);
-      return Promise.resolve();
     },
     comfort: (dsn) => {
       comfort.push(dsn);
@@ -70,7 +75,7 @@ function finto(op: {
     const righe = Object.fromEntries(testo.trim().split("\n").filter(Boolean).map((l) => l.split("\t")));
     return { stato: r.status, righe, testo };
   };
-  return { chiedi, scritti, comfort, chiamate: () => chiamateFg };
+  return { chiedi, scritti, comfort, chiamate: () => chiamateFg, massimoInsieme: () => massimo };
 }
 
 Deno.test("chiave sbagliata o assente: 403 e nessun comando", async () => {
@@ -97,6 +102,19 @@ Deno.test("caldo: HEAT a 24, ventola minima, alette in alto; riga in attesa", as
   ].sort());
   assertEquals(righe.esito, "ok: Soggiorno caldo 24.0 16:20");
   assertEquals(righe.soggiorno, "caldo 24.0  stanza 21.7  attesa");
+});
+
+Deno.test("caldo: le impostazioni partono una alla volta, prima il modo", async () => {
+  const f = finto({ climi: { [SOG]: { mode: OFF, sp: 200 }, [EVA]: { mode: OFF, sp: 190 } }, setLento: 20 });
+  await f.chiedi("azione=comando&c=soggiorno_caldo");
+  assertEquals(f.scritti.map((s) => s[1]), ["operation_mode", "adjust_temperature", "fan_speed", "af_vertical_swing", "af_vertical_direction"]);
+  assertEquals(f.massimoInsieme(), 1);
+});
+
+Deno.test("una scrittura rifiutata: esito di errore, niente ok falso", async () => {
+  const f = finto({ climi: { [SOG]: { mode: OFF, sp: 200 }, [EVA]: { mode: OFF, sp: 190 } }, setRotto: true });
+  const { righe } = await f.chiedi("azione=comando&c=soggiorno_caldo");
+  assertEquals(righe.esito, "comando non riuscito, riprova");
 });
 
 Deno.test("spento", async () => {
@@ -127,15 +145,15 @@ Deno.test("piu e meno rifiutati a clima spento o in deumidificazione", async () 
   assertEquals(f.scritti, []);
 });
 
-Deno.test("comfort di una stanza e di tutta la casa: comfort.yml, righe in attesa", async () => {
+Deno.test("Auto di una stanza e di tutta la casa: comfort.yml, righe in attesa", async () => {
   const f = finto();
   let r = await f.chiedi("azione=comando&c=eva_comfort");
   assertEquals(f.comfort, [EVA]);
-  assertEquals(r.righe.esito, "ok: Eva al ponte");
+  assertEquals(r.righe.esito, "ok: Eva torna Auto, 1-2 min");
   assertEquals(r.righe.eva, "spento  stanza 20.3  attesa");
   r = await f.chiedi("azione=comando&c=tutto_comfort");
   assertEquals(f.comfort, [EVA, ""]);
-  assertEquals(r.righe.esito, "ok: tutto al ponte");
+  assertEquals(r.righe.esito, "ok: tutto Auto, tra 1-2 minuti");
   assert(r.righe.soggiorno.endsWith("attesa") && r.righe.eva.endsWith("attesa"));
   assertEquals(f.scritti, []);
 });
@@ -147,14 +165,14 @@ Deno.test("tutto spento", async () => {
   assertEquals(righe.esito, "ok: tutto spento 16:20");
 });
 
-Deno.test("emergenza attiva: comandi di stanza rifiutati, Tutto Comfort e Tutto spento sì", async () => {
+Deno.test("emergenza attiva: comandi di stanza rifiutati, Tutto Auto e Tutto spento sì", async () => {
   const until = ADESSO.getTime() / 1000 + 3600; // 17:20
   const f = finto({ emergency: { mode: "off", until } });
   assertEquals((await f.chiedi("azione=stato")).righe.esito, "emergenza fino 17:20");
-  assertEquals((await f.chiedi("azione=comando&c=soggiorno_caldo")).righe.esito, "emergenza: usa Tutto Comfort");
-  assertEquals((await f.chiedi("azione=comando&c=eva_comfort")).righe.esito, "emergenza: usa Tutto Comfort");
+  assertEquals((await f.chiedi("azione=comando&c=soggiorno_caldo")).righe.esito, "emergenza: usa Tutto Auto");
+  assertEquals((await f.chiedi("azione=comando&c=eva_comfort")).righe.esito, "emergenza: usa Tutto Auto");
   assertEquals(f.scritti, []);
-  assertEquals((await f.chiedi("azione=comando&c=tutto_comfort")).righe.esito, "ok: tutto al ponte");
+  assertEquals((await f.chiedi("azione=comando&c=tutto_comfort")).righe.esito, "ok: tutto Auto, tra 1-2 minuti");
   assertEquals((await f.chiedi("azione=comando&c=tutto_spento")).righe.esito, "ok: tutto spento 16:20");
 });
 
@@ -173,12 +191,12 @@ Deno.test("un clima che non risponde non blocca l'altro", async () => {
   assertEquals(r.righe.esito, "Eva non risponde");
 });
 
-Deno.test("FGLair giù: righe non risponde, il Comfort funziona lo stesso", async () => {
+Deno.test("FGLair giù: righe non risponde, Auto funziona lo stesso", async () => {
   const f = finto({ loginRotto: true });
   let r = await f.chiedi("azione=stato");
   assertEquals([r.righe.soggiorno, r.righe.eva], ["non risponde", "non risponde"]);
   r = await f.chiedi("azione=comando&c=tutto_comfort");
-  assertEquals(r.righe.esito, "ok: tutto al ponte");
+  assertEquals(r.righe.esito, "ok: tutto Auto, tra 1-2 minuti");
   r = await f.chiedi("azione=comando&c=soggiorno_caldo");
   assertEquals(r.righe.esito, "Soggiorno non risponde");
 });

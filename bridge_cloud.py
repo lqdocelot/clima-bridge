@@ -462,15 +462,15 @@ def control_room(room, readings, H, autostate, actions, emerg, away, target, hea
 
     # 2) OVERRIDE MANUALE STICKY — resta finché non si preme ▶️ Comfort (comfort.yml azzera il flag).
     if st.get("manual"):
-        print("   ✋ override manuale attivo (▶️ Comfort per riprendere) → non intervengo")
+        print("   ✋ override manuale attivo (▶️ Auto per riprendere) → non intervengo")
         return False
     # rilevo un cambio a mano (telecomando o bot): stato ≠ ultimo impostato dall'automatismo.
     # In dry il clima riporta un setpoint suo → lì confronto solo il modo.
     if st.get("mode") is not None and (cur_mode != st["mode"]
                                        or (st["mode"] != DRY and cur_sp_raw != st["sp"])):
         remember(cur_mode, cur_sp_raw, manual=True)
-        print("   ✋ cambio manuale → resta finché non premi ▶️ Comfort")
-        actions.append(f"{room['name']}: override manuale (resta fino a ▶️ Comfort)")
+        print("   ✋ cambio manuale → resta finché non premi ▶️ Auto")
+        actions.append(f"{room['name']}: override manuale (resta fino a ▶️ Auto)")
         return False
 
     # 3) CAMERETTA: d'estate mai raffrescata dall'automatismo. Nella fascia dry_window controlla solo
@@ -666,8 +666,8 @@ def main():
 
         # Notifica il cambio di stagione (non al primo avvio, quando non c'è memoria da confrontare)
         if prev_season in ("inverno", "estate") and season != prev_season:
-            notify(f"🔥 Inverno: il Comfort ora scalda a {target:g}°" if heat
-                   else f"❄️ Estate: il Comfort torna a raffrescare a {target:g}°")
+            notify(f"🔥 Inverno: Auto ora scalda a {target:g}°" if heat
+                   else f"❄️ Estate: Auto torna a raffrescare a {target:g}°")
         autostate["_season"] = season
 
         # Notifica quando un'emergenza è APPENA scaduta (transizione attiva → spenta)

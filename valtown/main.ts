@@ -126,7 +126,7 @@ function ghEmergency(action: string) {
     },
   );
 }
-// ▶️ Comfort = riprendi automatico: azzera emergenza + tutti gli override manuali.
+// ▶️ Auto (comfort.yml) = riprendi automatico: azzera emergenza + tutti gli override manuali.
 // Con dsn vale per UNA sola stanza (emergenza e altre stanze restano come sono).
 function ghComfort(dsn = "") {
   if (!GH_PAT) return Promise.resolve();
@@ -286,7 +286,7 @@ function panel(
     rows.push([{ text: "✅ Accendi", callback_data: `${k}:on` }, {
       text: "⛔ Spegni",
       callback_data: `${k}:off`,
-    }, { text: "▶️ Comfort", callback_data: `${k}:auto` }]);
+    }, { text: "▶️ Auto", callback_data: `${k}:auto` }]);
     rows.push([{ text: "➖", callback_data: `${k}:-` }, {
       text: `${s.sp}°C`,
       callback_data: "R",
@@ -319,7 +319,7 @@ function panel(
   rows.push([{ text: "🆘 Tutto spento", callback_data: "E:off" }, {
     text: "🛡️ Sicura",
     callback_data: "E:safe",
-  }, { text: "▶️ Comfort tutti", callback_data: "E:comfort" }]);
+  }, { text: "▶️ Auto tutti", callback_data: "E:comfort" }]);
   return { inline_keyboard: rows };
 }
 export default async function (req: Request): Promise<Response> {
@@ -419,27 +419,27 @@ export default async function (req: Request): Promise<Response> {
         await commandAll(token, "off");
         note = "🆘 Tutto spento";
         txt =
-          "🆘 Tutto spento attivo per ~24h.\nPer riprendere l'automatico premi ▶️ Comfort.";
+          "🆘 Tutto spento attivo per ~24h.\nPer riprendere l'automatico premi ▶️ Auto.";
       } else if (act === "safe") {
         await ghEmergency("safe");
         await commandAll(token, "safe");
         note = "🛡️ Modalità sicura";
         txt =
-          "🛡️ Modalità sicura attiva per ~24h.\nPer riprendere l'automatico premi ▶️ Comfort.";
+          "🛡️ Modalità sicura attiva per ~24h.\nPer riprendere l'automatico premi ▶️ Auto.";
       } else {
         await ghComfort();
-        note = "▶️ Comfort";
+        note = "▶️ Auto";
         txt = "▶️ Automatico ripreso: emergenza e override manuali azzerati.";
       }
       await tg("sendMessage", { chat_id: chat, text: txt });
     } else if (data.endsWith(":auto")) {
-      // ▶️ Comfort di una stanza: l'automatico la riprende al prossimo giro del ponte (~15 min)
+      // ▶️ Auto di una stanza: comfort.yml, che lancia subito un giro del ponte (1-2 min)
       const k = data.split(":")[0];
       await ghComfort(ROOMS[k].dsn);
-      note = "▶️ Comfort " + ROOMS[k].name;
+      note = "▶️ Auto " + ROOMS[k].name;
       await tg("sendMessage", {
         chat_id: chat,
-        text: `▶️ ${ROOMS[k].name}: torna in automatico al prossimo giro del ponte (entro 15 min).` +
+        text: `▶️ ${ROOMS[k].name}: torna in automatico tra 1-2 minuti.` +
           "\nD'inverno: caldo a 24°, ventola minima, alette in alto.",
       });
     } else {

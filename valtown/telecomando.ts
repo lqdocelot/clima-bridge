@@ -4,11 +4,13 @@
 // Intestazione obbligatoria X-Chiave = TELECOMANDO_KEY. Il Kindle scrive le righe così come sono (eips):
 // solo ASCII, niente apostrofo, al massimo 34 caratteri. Progetto: bacheca-frigo,
 // docs/superpowers/specs/2026-11-07-telecomando-clima-design.md §6.
+// Il pulsante «Auto» (comando *_comfort) ridà la stanza al ponte: comfort.yml, poi un giro del ponte (1-2 min).
 // Env vars su val.town: TELECOMANDO_KEY, FGLAIR_EMAIL, FGLAIR_PASSWORD, GH_PAT, TARGET_WINTER (facoltativa, 24).
 import { DRY, fgLogin, fgProps, fgSet, HEAT, OFF, type Props } from "./fglair.ts";
 
 const REPO = "lqdocelot/clima-bridge";
-const RAW = `https://raw.githubusercontent.com/${REPO}/main/`;
+// file del ponte letti dall'API di GitHub: il raw tiene una copia vecchia fino a 5 minuti (prova dell'8/11)
+const CONTENUTI = `https://api.github.com/repos/${REPO}/contents/`;
 const STANZE = {
   soggiorno: { nome: "Soggiorno", dsn: "AC000W002919142", sensore: "🛋️ Soggiorno" },
   eva: { nome: "Eva", dsn: "AC000W002919128", sensore: "🧸 Cameretta EVA" },
@@ -81,7 +83,8 @@ export function crea(d: Deps) {
 
     const scrivi = async (k: Stanza, valori: [string, number][]) => {
       const pk = p[k]!;
-      await Promise.all(valori.filter(([n]) => pk[n]).map(([n, v]) => entro(d.set(t!, pk[n].key, v), scadenza)));
+      // una alla volta, prima il modo: tutte insieme il condizionatore ne perdeva qualcuna (prova dell'8/11)
+      for (const [n, v] of valori) if (pk[n]) await entro(d.set(t!, pk[n].key, v), scadenza);
       scritto[k] = {
         mode: valori.find(([n]) => n === "operation_mode")?.[1] ?? pk.operation_mode.value,
         sp: valori.find(([n]) => n === "adjust_temperature")?.[1] ?? pk.adjust_temperature.value,
@@ -93,7 +96,7 @@ export function crea(d: Deps) {
       if (comando === "tutto_comfort") {
         await entro(d.comfort(""), scadenza);
         (Object.keys(STANZE) as Stanza[]).forEach((k) => attesa.add(k));
-        esito = "ok: tutto al ponte";
+        esito = "ok: tutto Auto, tra 1-2 minuti";
       } else if (comando === "tutto_spento") {
         const vivi = (Object.keys(STANZE) as Stanza[]).filter((k) => p[k]);
         await Promise.all(vivi.map((k) => scrivi(k, [["operation_mode", OFF]])));
@@ -101,11 +104,11 @@ export function crea(d: Deps) {
       } else if (comando) {
         const k = chi as Stanza, nome = STANZE[k].nome;
         if (em) {
-          esito = "emergenza: usa Tutto Comfort";      // il ponte annullerebbe il comando
+          esito = "emergenza: usa Tutto Auto";         // il ponte annullerebbe il comando
         } else if (cosa === "comfort") {
           await entro(d.comfort(STANZE[k].dsn), scadenza);
           attesa.add(k);
-          esito = `ok: ${nome} al ponte`;
+          esito = `ok: ${nome} torna Auto, 1-2 min`;
         } else if (!p[k] || !t) {
           esito = `${nome} non risponde`;
         } else if (cosa === "caldo") {
@@ -178,5 +181,8 @@ export default crea({
     if (r.status >= 300) throw new Error(`comfort.yml ${r.status}`);
   },
   json: async (nome) =>
-    (await fetch(`${RAW}${nome}.json?t=${Date.now()}`, { signal: AbortSignal.timeout(4000) })).json(),
+    (await fetch(`${CONTENUTI}${nome}.json?ref=main`, {
+      headers: { Authorization: "Bearer " + GH_PAT, Accept: "application/vnd.github.raw+json" },
+      signal: AbortSignal.timeout(4000),
+    })).json(),
 });
