@@ -19,7 +19,7 @@ function finto(op: {
   limite?: number;
   setLento?: number;
   setRotto?: boolean;
-  robot?: Robot | null;
+  robot?: Robot | null | "rotta" | (() => Robot | null | "rotta");
 } = {}) {
   const climi: Record<string, Clima> = op.climi ?? {
     [SOG]: { mode: HEAT, sp: 240 },
@@ -311,6 +311,10 @@ Deno.test("robot: troppo lento, esito incerto (mai ripetere)", async () => {
 Deno.test("robot: senza accesso e comandi sbagliati", async () => {
   let r = await finto().chiedi("azione=stato&pagina=5");
   assertEquals(r.righe, { esito: "accesso Roborock da rifare", robot: "--" });
+  r = await finto({ robot: "rotta" }).chiedi("azione=stato&pagina=5");
+  assertEquals(r.righe, { esito: "variabile ROBOROCK scritta male", robot: "--" });
+  r = await finto({ robot: () => robotFinto().r }).chiedi("azione=stato&pagina=5");
+  assertEquals(r.righe.robot, "in carica  batteria 80%");
   r = await finto({ robot: robotFinto().r }).chiedi("azione=comando&c=robot_x9");
   assertEquals([r.stato, r.righe.esito], [400, "comando sconosciuto"]);
 });
@@ -322,5 +326,7 @@ Deno.test("robot: elenco per il generatore", async () => {
   assertEquals([r.stato, JSON.parse(r.testo)], [502, { errore: "accesso" }]);
   r = await finto().chiedi("azione=elenco");
   assertEquals(r.stato, 503);
+  r = await finto({ robot: "rotta" }).chiedi("azione=elenco");
+  assertEquals([r.stato, JSON.parse(r.testo)], [503, { errore: "variabile" }]);
   assertEquals((await finto({ robot: robotFinto().r }).chiedi("azione=elenco", "altra")).stato, 403);
 });

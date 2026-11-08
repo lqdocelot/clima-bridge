@@ -39,7 +39,7 @@ export type Deps = {
   props: (tok: string, dsn: string) => Promise<Props>;
   set: (tok: string, key: number, value: number) => Promise<void>;
   json: (nome: "sensors" | "emergency") => Promise<unknown>;
-  robot?: Robot | null;          // null: variabile ROBOROCK mancante o scritta male
+  robot?: Robot | null | "rotta" | (() => Robot | null | "rotta");   // null: ROBOROCK mancante; "rotta": non è JSON valido
 };
 
 const ascii = (s: string) => s.normalize("NFD").replace(/[^\x20-\x7e]/g, "").replace(/'/g, " ").slice(0, 34);
@@ -182,9 +182,10 @@ async function robot(d: Deps, azione: string, comando: string): Promise<Response
   const limite = d.limite ?? 12000;
   const scadenza = Math.max(50, limite - 500);
   if (azione === "elenco") {
-    if (!d.robot) return new Response('{"errore":"accesso"}', { status: 503 });
+    const r = typeof d.robot === "function" ? d.robot() : d.robot;
+    if (!r || r === "rotta") return new Response(JSON.stringify({ errore: r ? "variabile" : "accesso" }), { status: 503 });
     try {
-      const e = await entro(d.robot.elenco(), scadenza);
+      const e = await entro(r.elenco(), scadenza);
       return new Response(JSON.stringify(e), { headers: { "Content-Type": "application/json; charset=utf-8" } });
     } catch (e) {
       const tipo = e instanceof ErroreRoborock ? e.tipo : "tempo";
@@ -193,8 +194,8 @@ async function robot(d: Deps, azione: string, comando: string): Promise<Response
   }
   const m = /^robot_(?:r(\d+)|s(\d+)|(pausa)|(base))$/.exec(comando);
   if (azione === "comando" && !m) return risposta({ esito: "comando sconosciuto" }, 400);
-  if (!d.robot) return risposta({ esito: ERRORI_ROBOT.accesso, robot: "--" }, 200);
-  const r = d.robot;
+  const r = typeof d.robot === "function" ? d.robot() : d.robot;
+  if (!r || r === "rotta") return risposta({ esito: r ? "variabile ROBOROCK scritta male" : ERRORI_ROBOT.accesso, robot: "--" }, 200);
   const corto = (nome: string) => ascii(nome).trim().slice(0, 16).trimEnd();
   let esito = "", stato = "--";
   try {
@@ -227,14 +228,21 @@ function risposta(righe: Record<string, string>, status: number) {
 // ---------------------------------------------------------------- val.town
 const env = (n: string) => (globalThis as any).Deno?.env.get(n) ?? "";
 const GH_PAT = env("GH_PAT");
-const ROBOROCK = (() => {
+// ROBOROCK letta a ogni richiesta: una variabile aggiunta o cambiata vale subito (8/11)
+let robotCache: { testo: string; robot: Robot | "rotta" } | null = null;
+function robotDaEnv(): Robot | null | "rotta" {
+  const testo = env("ROBOROCK").trim();
+  if (!testo) return null;
+  const prima = robotCache;
+  if (prima && prima.testo === testo) return prima.robot;
+  let robot: Robot | "rotta" = "rotta";
   try {
-    const c = JSON.parse(env("ROBOROCK"));
-    return c?.rriot && c.duid && c.localKey ? c : null;
-  } catch {
-    return null;
-  }
-})();
+    const c = JSON.parse(testo);
+    if (c?.rriot && c.duid && c.localKey) robot = creaRobot(c, reteVera);
+  } catch { /* resta "rotta" */ }
+  robotCache = { testo, robot };
+  return robot;
+}
 
 export default crea({
   chiave: env("TELECOMANDO_KEY"),
@@ -249,5 +257,5 @@ export default crea({
       headers: { Authorization: "Bearer " + GH_PAT, Accept: "application/vnd.github.raw+json" },
       signal: AbortSignal.timeout(4000),
     })).json(),
-  robot: ROBOROCK ? creaRobot(ROBOROCK, reteVera) : null,
+  robot: robotDaEnv,
 });
