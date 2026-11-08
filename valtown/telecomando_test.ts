@@ -2,6 +2,7 @@
 import { assert, assertEquals } from "jsr:@std/assert@1";
 import { crea, rigaStato } from "./telecomando.ts";
 import { COOL, DRY, FAN, HEAT, OFF } from "./fglair.ts";
+import { ErroreRoborock, type Robot } from "./roborock.ts";
 
 const SOG = "AC000W002919142", EVA = "AC000W002919128";
 const ADESSO = new Date("2026-11-08T15:20:00Z"); // 16:20 in Italia
@@ -18,6 +19,7 @@ function finto(op: {
   limite?: number;
   setLento?: number;
   setRotto?: boolean;
+  robot?: Robot | null;
 } = {}) {
   const climi: Record<string, Clima> = op.climi ?? {
     [SOG]: { mode: HEAT, sp: 240 },
@@ -31,6 +33,7 @@ function finto(op: {
     caldo: 24,
     freddo: 24,
     limite: op.limite ?? 2000,
+    robot: op.robot,
     adesso: () => ADESSO,
     login: () => {
       chiamateFg++;
@@ -231,4 +234,93 @@ Deno.test("righe sempre ASCII, senza apostrofo, al massimo 34 caratteri", () => 
     const r = rigaStato({ mode, sp: 23.5, temp: 21.7 });
     assert(r.length <= 34 && /^[\x20-\x7e]*$/.test(r) && !r.includes("'"), r);
   }
+});
+
+// ---------------------------------------------------------------- robot (pagina 5)
+function robotFinto(op: { errore?: ErroreRoborock; lento?: boolean } = {}) {
+  const fatti: string[] = [];
+  const fai = <T>(cosa: string, v: T): Promise<T> => {
+    fatti.push(cosa);
+    if (op.lento) return new Promise(() => {});
+    return op.errore ? Promise.reject(op.errore) : Promise.resolve(v);
+  };
+  const r: Robot = {
+    elenco: () => fai("elenco", { routine: [{ id: 42, nome: "Dopo cena" }], stanze: [{ id: 16, nome: "Cucina" }] }),
+    stato: () => fai("stato", "in carica  batteria 80%"),
+    routine: (id) => fai(`routine ${id}`, { nome: "Dopo cena", stato: "pulisce  batteria 80%" }),
+    stanza: (s) => fai(`stanza ${s}`, { nome: s === 17 ? "Cameretta di Eva grande" : "Cucina", stato: "pulisce  batteria 80%" }),
+    pausa: () => fai("pausa", "in pausa  batteria 80%"),
+    base: () => fai("base", "torna alla base  80%"),
+  };
+  return { r, fatti };
+}
+
+Deno.test("robot: stato della pagina 5 senza toccare FGLair", async () => {
+  const rb = robotFinto();
+  const f = finto({ robot: rb.r });
+  const { stato, righe } = await f.chiedi("azione=stato&pagina=5");
+  assertEquals(stato, 200);
+  assertEquals(righe, { esito: "", robot: "in carica  batteria 80%" });
+  assertEquals(f.chiamate(), 0);
+  assertEquals(rb.fatti, ["stato"]);
+});
+
+Deno.test("robot: stato senza clima di mezzo anche per azione=stato normale", async () => {
+  const rb = robotFinto();
+  const { righe } = await finto({ robot: rb.r }).chiedi("azione=stato");
+  assertEquals(righe.soggiorno, "caldo 24.0  stanza 21.7");
+  assertEquals(rb.fatti, []);
+});
+
+Deno.test("robot: routine, stanza, pausa e base", async () => {
+  const rb = robotFinto();
+  const f = finto({ robot: rb.r });
+  let r = await f.chiedi("azione=comando&c=robot_r42");
+  assertEquals(r.righe, { esito: "ok: Dopo cena avviata 16:20", robot: "pulisce  batteria 80%" });
+  r = await f.chiedi("azione=comando&c=robot_s17");
+  assertEquals(r.righe.esito, "ok: Cameretta di Eva avviata 16:20");   // nome accorciato a 16, riga di 34
+  r = await f.chiedi("azione=comando&c=robot_pausa");
+  assertEquals(r.righe, { esito: "ok: pausa 16:20", robot: "in pausa  batteria 80%" });
+  r = await f.chiedi("azione=comando&c=robot_base");
+  assertEquals(r.righe, { esito: "ok: torna alla base 16:20", robot: "torna alla base  80%" });
+  assertEquals(rb.fatti, ["routine 42", "stanza 17", "pausa", "base"]);
+  assertEquals(f.chiamate(), 0);
+});
+
+Deno.test("robot: errori in parole per il Kindle", async () => {
+  const casi: [ErroreRoborock, string][] = [
+    [new ErroreRoborock("tempo", "x"), "robot non risponde"],
+    [new ErroreRoborock("inviato", "x"), "inviato, guarda lo stato"],
+    [new ErroreRoborock("accesso", "x"), "accesso Roborock da rifare"],
+    [new ErroreRoborock("web", "x"), "Roborock non risponde"],
+    [new ErroreRoborock("stanza", "x"), "stanza non trovata"],
+    [new ErroreRoborock("routine", "x"), "routine non trovata"],
+    [new ErroreRoborock("robot", "invalid status"), "robot: invalid status"],
+  ];
+  for (const [errore, testo] of casi) {
+    const r = await finto({ robot: robotFinto({ errore }).r }).chiedi("azione=comando&c=robot_s16");
+    assertEquals(r.righe, { esito: testo, robot: "--" });
+  }
+});
+
+Deno.test("robot: troppo lento, esito incerto (mai ripetere)", async () => {
+  const r = await finto({ robot: robotFinto({ lento: true }).r, limite: 600 }).chiedi("azione=comando&c=robot_base");
+  assertEquals(r.righe.esito, "esito incerto: guarda lo stato");
+});
+
+Deno.test("robot: senza accesso e comandi sbagliati", async () => {
+  let r = await finto().chiedi("azione=stato&pagina=5");
+  assertEquals(r.righe, { esito: "accesso Roborock da rifare", robot: "--" });
+  r = await finto({ robot: robotFinto().r }).chiedi("azione=comando&c=robot_x9");
+  assertEquals([r.stato, r.righe.esito], [400, "comando sconosciuto"]);
+});
+
+Deno.test("robot: elenco per il generatore", async () => {
+  let r = await finto({ robot: robotFinto().r }).chiedi("azione=elenco");
+  assertEquals(JSON.parse(r.testo), { routine: [{ id: 42, nome: "Dopo cena" }], stanze: [{ id: 16, nome: "Cucina" }] });
+  r = await finto({ robot: robotFinto({ errore: new ErroreRoborock("accesso", "x") }).r }).chiedi("azione=elenco");
+  assertEquals([r.stato, JSON.parse(r.testo)], [502, { errore: "accesso" }]);
+  r = await finto().chiedi("azione=elenco");
+  assertEquals(r.stato, 503);
+  assertEquals((await finto({ robot: robotFinto().r }).chiedi("azione=elenco", "altra")).stato, 403);
 });

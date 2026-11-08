@@ -7,8 +7,14 @@
 // Pulsanti per stanza: Caldo, Freddo, Deumid., Ventola, −, +, Spento; per la casa: Tutto caldo/freddo, Tutto spento.
 // Caldo e Freddo partono a 24° con ventola al minimo e alette tutte in alto. Ogni comando è manuale:
 // il ponte non tocca più la stanza finché non si preme «▶️ Auto» nel bot.
-// Env vars su val.town: TELECOMANDO_KEY, FGLAIR_EMAIL, FGLAIR_PASSWORD, GH_PAT, TARGET_WINTER (facoltativa, 24).
+// Robot (pagina 5, spec 2026-11-08-scheda-robot-design.md):
+//   GET  ?azione=stato&pagina=5          -> righe esito, robot
+//   POST ?azione=comando&c=robot_r<id> | robot_s<segmento> | robot_pausa | robot_base
+//   GET  ?azione=elenco                  -> JSON {routine:[{id,nome}], stanze:[{id,nome}]} per il generatore
+// Env vars su val.town: TELECOMANDO_KEY, FGLAIR_EMAIL, FGLAIR_PASSWORD, GH_PAT, TARGET_WINTER (facoltativa, 24),
+// ROBOROCK (JSON dell'accesso, da roborock_accesso.py).
 import { COOL, DRY, FAN, fgLogin, fgProps, fgSet, HEAT, OFF, type Props } from "./fglair.ts";
+import { creaRobot, ErroreRoborock, reteVera, type Robot } from "./roborock.ts";
 
 const REPO = "lqdocelot/clima-bridge";
 // file del ponte letti dall'API di GitHub: il raw tiene una copia vecchia fino a 5 minuti (prova dell'8/11)
@@ -33,6 +39,7 @@ export type Deps = {
   props: (tok: string, dsn: string) => Promise<Props>;
   set: (tok: string, key: number, value: number) => Promise<void>;
   json: (nome: "sensors" | "emergency") => Promise<unknown>;
+  robot?: Robot | null;          // null: variabile ROBOROCK mancante o scritta male
 };
 
 const ascii = (s: string) => s.normalize("NFD").replace(/[^\x20-\x7e]/g, "").replace(/'/g, " ").slice(0, 34);
@@ -66,6 +73,8 @@ export function crea(d: Deps) {
     const url = new URL(req.url);
     const azione = url.searchParams.get("azione") ?? "stato";
     const comando = azione === "comando" ? url.searchParams.get("c") ?? "" : "";
+    if (azione === "elenco" || (azione === "stato" && url.searchParams.get("pagina") === "5") ||
+        comando.startsWith("robot_")) return robot(d, azione, comando);   // prima di FGLair e dei comandi clima
     const [chi, cosa] = comando.split("_") as [string, string];
     const valido = TUTTO.includes(comando) || (chi in STANZE && (AZIONI_STANZA as readonly string[]).includes(cosa));
     if (azione === "comando" && !valido) return risposta({ esito: "comando sconosciuto" }, 400);
@@ -158,6 +167,58 @@ export function crea(d: Deps) {
   };
 }
 
+// ---------------------------------------------------------------- robot
+const ERRORI_ROBOT: Record<string, string> = {
+  accesso: "accesso Roborock da rifare",
+  web: "Roborock non risponde",
+  rete: "robot non risponde",
+  tempo: "robot non risponde",
+  inviato: "inviato, guarda lo stato",
+  routine: "routine non trovata",
+  stanza: "stanza non trovata",
+};
+
+async function robot(d: Deps, azione: string, comando: string): Promise<Response> {
+  const limite = d.limite ?? 12000;
+  const scadenza = Math.max(50, limite - 500);
+  if (azione === "elenco") {
+    if (!d.robot) return new Response('{"errore":"accesso"}', { status: 503 });
+    try {
+      const e = await entro(d.robot.elenco(), scadenza);
+      return new Response(JSON.stringify(e), { headers: { "Content-Type": "application/json; charset=utf-8" } });
+    } catch (e) {
+      const tipo = e instanceof ErroreRoborock ? e.tipo : "tempo";
+      return new Response(JSON.stringify({ errore: tipo }), { status: 502 });
+    }
+  }
+  const m = /^robot_(?:r(\d+)|s(\d+)|(pausa)|(base))$/.exec(comando);
+  if (azione === "comando" && !m) return risposta({ esito: "comando sconosciuto" }, 400);
+  if (!d.robot) return risposta({ esito: ERRORI_ROBOT.accesso, robot: "--" }, 200);
+  const r = d.robot;
+  const corto = (nome: string) => ascii(nome).trim().slice(0, 16).trimEnd();
+  let esito = "", stato = "--";
+  try {
+    if (!m) {
+      stato = await entro(r.stato(), scadenza);
+    } else if (m[1] || m[2]) {
+      const v = await entro(m[1] ? r.routine(Number(m[1])) : r.stanza(Number(m[2])), scadenza);
+      esito = `ok: ${corto(v.nome)} avviata ${ora(d.adesso())}`;
+      stato = v.stato;
+    } else if (m[3]) {
+      stato = await entro(r.pausa(), scadenza);
+      esito = `ok: pausa ${ora(d.adesso())}`;
+    } else {
+      stato = await entro(r.base(), scadenza);
+      esito = `ok: torna alla base ${ora(d.adesso())}`;
+    }
+  } catch (e) {
+    if (e instanceof ErroreRoborock) esito = e.tipo === "robot" ? `robot: ${e.message}` : ERRORI_ROBOT[e.tipo];
+    else if (e instanceof Error && e.message === "tempo scaduto") esito = m ? "esito incerto: guarda lo stato" : "robot non risponde";
+    else esito = "comando non riuscito, riprova";
+  }
+  return risposta({ esito, robot: stato }, 200);
+}
+
 function risposta(righe: Record<string, string>, status: number) {
   const testo = Object.entries(righe).map(([k, v]) => `${k}\t${ascii(v)}`).join("\n") + "\n";
   return new Response(testo, { status, headers: { "Content-Type": "text/plain; charset=us-ascii" } });
@@ -166,6 +227,14 @@ function risposta(righe: Record<string, string>, status: number) {
 // ---------------------------------------------------------------- val.town
 const env = (n: string) => (globalThis as any).Deno?.env.get(n) ?? "";
 const GH_PAT = env("GH_PAT");
+const ROBOROCK = (() => {
+  try {
+    const c = JSON.parse(env("ROBOROCK"));
+    return c?.rriot && c.duid && c.localKey ? c : null;
+  } catch {
+    return null;
+  }
+})();
 
 export default crea({
   chiave: env("TELECOMANDO_KEY"),
@@ -180,4 +249,5 @@ export default crea({
       headers: { Authorization: "Bearer " + GH_PAT, Accept: "application/vnd.github.raw+json" },
       signal: AbortSignal.timeout(4000),
     })).json(),
+  robot: ROBOROCK ? creaRobot(ROBOROCK, reteVera) : null,
 });
