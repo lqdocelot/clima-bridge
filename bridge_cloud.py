@@ -491,7 +491,7 @@ def control_room(room, readings, H, autostate, actions, emerg, away, target, hea
             print("   🌅 spegnimento del mattino")
             fatti[dsn] = oggi
             remember(OFF, cur_sp_raw, manual=True)
-            actions.append(f"{room['name']}: caldo spento alle {int(MORNING_OFF)}:{round(MORNING_OFF % 1 * 60):02d}")
+            actions.append(f"{room['name']}: caldo spento (spegnimento delle {int(MORNING_OFF)}:{round(MORNING_OFF % 1 * 60):02d})")
             return False
         fatti[dsn] = oggi
 
