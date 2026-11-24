@@ -26,6 +26,15 @@ def now_it():
     return datetime.now(TZ_ROME)
 
 
+def parse_hhmm(s):
+    """'08:30' → 8.5 (ora decimale); None se vuoto o non valido (funzione disattivata)."""
+    try:
+        h, m = (int(x) for x in s.split(":"))
+    except ValueError:
+        return None
+    return h + m / 60 if 0 <= h < 24 and 0 <= m < 60 else None
+
+
 def in_window(h, start, end):
     """True se l'ora decimale h è in [start..end), con wrap a mezzanotte (es. 22→8)."""
     return (start <= h or h < end) if start > end else (start <= h < end)
@@ -46,6 +55,10 @@ TARGET_WINTER = float(os.environ.get("TARGET_WINTER", "24"))   # d'inverno: cald
 HEAT_BELOW = float(os.environ.get("HEAT_BELOW", "14"))
 COOL_ABOVE = float(os.environ.get("COOL_ABOVE", "18"))
 HEAT_SP_MIN, HEAT_SP_MAX = 17.0, 25.0
+# Spegnimento del mattino (24/11): a quest'ora ogni stanza in CALDO si spegne, anche se accesa a mano.
+# Una volta al giorno per stanza, al primo giro utile entro MORNING_OFF_SPAN ore. 'no' = disattivato.
+MORNING_OFF = parse_hhmm(os.environ.get("MORNING_OFF", "08:30"))
+MORNING_OFF_SPAN = 1.5
 MAX_DELTA = float(os.environ.get("MAX_DELTA", "6.0"))      # cap Δ interno-esterno (anti shock termico)
 MAINTENANCE_MAX = float(os.environ.get("MAINTENANCE_MAX", "28.0"))  # via di casa: raffresca solo sopra questa
 # Umidità. Di GIORNO (DAY_FROM→DAY_TO) la soglia è più severa e ha la precedenza: appena si
@@ -430,7 +443,8 @@ def control_room(room, readings, H, autostate, actions, emerg, away, target, hea
         if reverted:
             print("   🆘 emergenza: spengo")
             if not DRY_RUN: fg_set(H, p["operation_mode"]["key"], OFF)
-        remember(OFF, cur_sp_raw)
+        # il manuale resta manuale: alla scadenza l'automatico non deve accendere da solo (visto 23/11 21:30)
+        remember(OFF, cur_sp_raw, manual=bool(st.get("manual")))
         return reverted
     if emerg == "safe":
         if room.get("always_off"):   # la cameretta non si accende nemmeno in modalità sicura
@@ -459,6 +473,27 @@ def control_room(room, readings, H, autostate, actions, emerg, away, target, hea
             print(f"   🆘 modalità sicura → {', '.join(changed)}")
         remember(COOL, sp_raw)
         return bool(changed)
+
+    # 1b) SPEGNIMENTO DEL MATTINO — vince anche sul manuale: serve proprio a chi accende e si dimentica.
+    #     Poi la stanza resta spenta come se l'avesse spenta lui (manuale), altrimenti l'automatico
+    #     invernale la riaccenderebbe al giro dopo. Segnato anche se era già spenta: chi accende dopo
+    #     le 8:30 non viene toccato. La voce inizia con "_", così ▶️ Auto (comfort_reset) la conserva.
+    adesso = now_it()
+    ora = adesso.hour + adesso.minute / 60
+    fatti = autostate.setdefault("_spento_mattina", {})
+    oggi = adesso.date().isoformat()
+    if (MORNING_OFF is not None and MORNING_OFF <= ora < MORNING_OFF + MORNING_OFF_SPAN
+            and fatti.get(dsn) != oggi):
+        if cur_mode == HEAT:
+            codice = 200 if DRY_RUN else fg_set(H, p["operation_mode"]["key"], OFF)
+            if not 200 <= codice < 300:
+                raise RuntimeError(f"spegnimento del mattino rifiutato ({codice})")   # riprova al giro dopo
+            print("   🌅 spegnimento del mattino")
+            fatti[dsn] = oggi
+            remember(OFF, cur_sp_raw, manual=True)
+            actions.append(f"{room['name']}: caldo spento alle {int(MORNING_OFF)}:{round(MORNING_OFF % 1 * 60):02d}")
+            return False
+        fatti[dsn] = oggi
 
     # 2) OVERRIDE MANUALE STICKY — resta finché non si preme ▶️ Comfort (comfort.yml azzera il flag).
     if st.get("manual"):
@@ -672,7 +707,10 @@ def main():
 
         # Notifica quando un'emergenza è APPENA scaduta (transizione attiva → spenta)
         if autostate.get("_emergency") in ("off", "safe") and emerg is None:
-            notify("✅ Emergenza terminata: l'automatismo del clima è ripreso normalmente.")
+            if any(autostate.get(r["dsn"], {}).get("manual") for r in ROOMS):
+                notify("✅ Emergenza terminata. Le stanze in manuale restano come sono: ▶️ Auto per l'automatico.")
+            else:
+                notify("✅ Emergenza terminata: l'automatismo del clima è ripreso normalmente.")
         autostate["_emergency"] = emerg or "none"
 
         # Notifica una sola volta l'ingresso/uscita dalla modalità degradata (Aqara giù → sensore interno clima).

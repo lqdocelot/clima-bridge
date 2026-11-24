@@ -45,6 +45,7 @@ jobs:
           TARGET_WINTER: ${{ vars.TARGET_WINTER || '24' }}    # comfort invernale: caldo fisso sul clima
           HEAT_BELOW: ${{ vars.HEAT_BELOW || '14' }}          # media esterna del giorno ≤ → inverno
           COOL_ABOVE: ${{ vars.COOL_ABOVE || '18' }}          # media esterna del giorno ≥ → estate (in mezzo resta com'era)
+          MORNING_OFF: ${{ vars.MORNING_OFF || '08:30' }}     # spegne il caldo ogni mattina a quest'ora ('no' = mai)
           MAX_DELTA: ${{ vars.MAX_DELTA || '6' }}             # Δ max interno-esterno (anti shock termico)
           MAINTENANCE_MAX: ${{ vars.MAINTENANCE_MAX || '28' }} # via di casa: raffresca solo sopra questa
           RH_DRY_ON: ${{ vars.RH_DRY_ON || '62' }}             # umidità % oltre cui passare in dry
